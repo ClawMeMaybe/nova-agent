@@ -1,0 +1,414 @@
+[
+  {
+    "name": "code_run",
+    "description": "Execute code — python scripts or bash/shell commands. Use 'type' to specify language (python/bash). Use 'timeout' for max execution time. Prefer python for complex operations; use bash only for system commands.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "The code to execute"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["python", "bash"],
+          "description": "Code type: python or bash",
+          "default": "python"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Max execution time in seconds",
+          "default": 60
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for execution"
+        }
+      },
+      "required": ["code"]
+    }
+  },
+  {
+    "name": "file_read",
+    "description": "Read file content. Supports start line, keyword search, and line count limits. Use keyword for searching within files.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path to read"
+        },
+        "start": {
+          "type": "integer",
+          "description": "Start line number (1-indexed)",
+          "default": 1
+        },
+        "keyword": {
+          "type": "string",
+          "description": "Search for this keyword (case-insensitive)"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Max lines to read",
+          "default": 200
+        },
+        "show_linenos": {
+          "type": "boolean",
+          "description": "Show line numbers",
+          "default": true
+        }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "file_write",
+    "description": "Write content to a file. Use mode='append' to add to existing file, mode='overwrite' to replace. For small edits, prefer file_patch.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path to write"
+        },
+        "content": {
+          "type": "string",
+          "description": "Content to write"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["overwrite", "append", "prepend"],
+          "description": "Write mode",
+          "default": "overwrite"
+        }
+      },
+      "required": ["path", "content"]
+    }
+  },
+  {
+    "name": "file_patch",
+    "description": "Patch a file by replacing a unique block of old_content with new_content. For small, precise edits. Use file_read first to verify current content.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path to patch"
+        },
+        "old_content": {
+          "type": "string",
+          "description": "The exact text block to find (must be unique in the file)"
+        },
+        "new_content": {
+          "type": "string",
+          "description": "The replacement text"
+        }
+      },
+      "required": ["path", "old_content", "new_content"]
+    }
+  },
+  {
+    "name": "web_scan",
+    "description": "Scan web page content. For simple web tasks, use code_run with requests/beautifulsoup4 instead. Full browser integration requires setup.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL to scan"
+        },
+        "text_only": {
+          "type": "boolean",
+          "description": "Return text only (no HTML)",
+          "default": false
+        }
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "web_execute_js",
+    "description": "Execute JavaScript in browser context. Requires browser integration. For web automation, use code_run with selenium/playwright instead.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "JavaScript code to execute"
+        },
+        "save_to_file": {
+          "type": "string",
+          "description": "Save JS return value to this file path"
+        }
+      },
+      "required": ["script"]
+    }
+  },
+  {
+    "name": "ask_user",
+    "description": "Ask the user a question and wait for their response. Use for clarifications, confirmations, and decisions on irreversible operations.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string",
+          "description": "Question to ask the user"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Optional list of suggested answers"
+        }
+      },
+      "required": ["question"]
+    }
+  },
+  {
+    "name": "update_working_checkpoint",
+    "description": "Update working memory — set key info and related SOP for the current task. Call at task start or mid-task to focus the agent's attention.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "key_info": {
+          "type": "string",
+          "description": "Key information to remember for this task"
+        },
+        "related_sop": {
+          "type": "string",
+          "description": "Path to relevant SOP file"
+        }
+      },
+      "required": ["key_info"]
+    }
+  },
+  {
+    "name": "start_long_term_update",
+    "description": "Distill task experience into long-term memory. Call after completing a complex task to save proven knowledge. Only store verified, durable facts and workflows.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "Brief summary of what was learned"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["fact", "sop", "insight"],
+          "description": "Type of knowledge to store"
+        }
+      },
+      "required": ["summary"]
+    }
+  },
+  {
+    "name": "wiki_ingest",
+    "description": "Ingest knowledge into the wiki — creates a new page or merges into existing one (append strategy, never replaces). This is the compounding mechanism: knowledge grows across sessions. Use cross-references like [[page-name]] to link pages.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Page title (used to generate slug)"
+        },
+        "content": {
+          "type": "string",
+          "description": "Markdown content for the wiki page"
+        },
+        "tags": {
+          "type": "string",
+          "description": "Comma-separated tags for search (max 20 tags)"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["architecture", "decision", "pattern", "debugging", "environment", "session-log", "reference", "convention"],
+          "description": "Page category",
+          "default": "reference"
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "description": "Confidence level of this knowledge",
+          "default": "medium"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "description": "Where to store: local (project-specific), global (cross-project transferable), or auto (routed by category — environment/debugging/session-log→local, pattern/convention/decision→global)",
+          "default": "auto"
+        }
+      },
+      "required": ["title", "content", "tags"]
+    }
+  },
+  {
+    "name": "wiki_query",
+    "description": "Search wiki pages by keywords, tags, and category. Returns matching pages with relevance snippets. Searches both local (project-specific) and global (cross-project) tiers by default.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search text (matched against title, tags, and content)"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["architecture", "decision", "pattern", "debugging", "environment", "session-log", "reference", "convention"],
+          "description": "Filter by category"
+        },
+        "tags": {
+          "type": "string",
+          "description": "Filter by comma-separated tags"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "description": "Which tier to search: local (project only), global (cross-project), auto (both, local first)",
+          "default": "auto"
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "fact_add",
+    "description": "Add a verified fact to the knowledge base. Facts have trust scores that evolve with use: helpful facts gain trust (+0.05), unhelpful facts lose trust (-0.10). Use for quick, structured knowledge.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "The fact content (must be unique)"
+        },
+        "category": {
+          "type": "string",
+          "description": "Fact category (e.g. environment, architecture, debugging)"
+        },
+        "tags": {
+          "type": "string",
+          "description": "Comma-separated tags"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "description": "Where to store: local (project-specific), global (cross-project), auto (routed by category)",
+          "default": "auto"
+        }
+      },
+      "required": ["content"]
+    }
+  },
+  {
+    "name": "fact_search",
+    "description": "Search facts by keywords with trust-based ranking. Searches both local and global tiers by default (local first for relevance).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search keywords"
+        },
+        "category": {
+          "type": "string",
+          "description": "Filter by category"
+        },
+        "min_trust": {
+          "type": "number",
+          "description": "Minimum trust score threshold (0.0-1.0)",
+          "default": 0.3
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "description": "Which tier to search: local (project only), global (cross-project), auto (both, local first)",
+          "default": "auto"
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "db_query",
+    "description": "Execute SQL queries against your knowledge database. You are the DBA of your own memory — write SELECT to retrieve knowledge, INSERT to add structured data, UPDATE to modify records. For precise, relational queries this replaces wiki_query/fact_search. Example: SELECT f.content, f.trust_score FROM facts f WHERE f.category='environment' AND f.trust_score > 0.7. Sandbox rules: only SELECT/INSERT/UPDATE allowed, no DROP/DELETE/ALTER. Max 50 rows per query. Use db_schema first to understand available tables and columns.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "sql": {
+          "type": "string",
+          "description": "SQL query to execute (SELECT, INSERT, or UPDATE only)"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "default": "auto",
+          "description": "Which DB tier to query: local (project-specific), global (cross-project), auto (both, local first)"
+        }
+      },
+      "required": ["sql"]
+    }
+  },
+  {
+    "name": "db_schema",
+    "description": "Inspect your knowledge database schema — see available tables, columns, types, and row counts. Use this to understand what you can query before writing SQL with db_query.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "default": "auto",
+          "description": "Which DB tier schema to inspect"
+        }
+      }
+    }
+  },
+  {
+    "name": "wiki_export",
+    "description": "Export wiki pages to markdown files for human browsing and git tracking. Creates .nova/wiki/*.md files with YAML frontmatter. Does not modify the database — markdown is a read-only view.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global"],
+          "default": "local",
+          "description": "Which tier's wiki pages to export"
+        },
+        "output_dir": {
+          "type": "string",
+          "description": "Directory to write markdown files (default: .nova/wiki/)"
+        }
+      }
+    }
+  },
+  {
+    "name": "cron",
+    "description": "Manage scheduled cron jobs. Create recurring or one-shot tasks that run automatically. Use action='create' to schedule a task, action='list' to see all jobs, action='remove' to delete a job, action='run' to trigger a job immediately. Jobs run in fresh sessions — prompts must be self-contained. You can schedule your own maintenance, reviews, or experiments.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["create", "list", "remove", "run"],
+          "description": "Action to perform"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "For create: self-contained prompt to execute when the job runs"
+        },
+        "schedule": {
+          "type": "string",
+          "description": "For create: schedule type — '30m' (once in 30min), 'every 2h' (recurring interval), '0 9 * * *' (cron expression)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional friendly name for the job"
+        },
+        "job_id": {
+          "type": "string",
+          "description": "For remove/run: the job ID to target"
+        }
+      },
+      "required": ["action"]
+    }
+  }
+]

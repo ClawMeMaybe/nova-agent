@@ -1,0 +1,40 @@
+# Nova runtime data
+.nova/
+*.db
+L0_meta_rules.txt
+L1_insight_index.txt
+L2_global_facts.txt
+global_mem_insight.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Temp/sandbox
+temp/
+*.tmp
+*.nova.py
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Secrets
+mykey.py
+.env
+
+# OMC plugin state
+.omc/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cron runtime lock
+nova/cron/.tick.lock
