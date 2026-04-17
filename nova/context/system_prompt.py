@@ -37,11 +37,21 @@ Use whichever tool fits the moment:
 
 Category → tier routing (auto): environment/debugging/session-log → local, pattern/convention/decision → global.
 
+### How to Remember Skills
+Use skill_add to crystallize repeatable workflows:
+- **skill_add(name, description, steps, triggers, pitfalls)** — for structured SOPs: repeatable multi-step procedures with trigger keywords and anti-patterns
+- Steps must be numbered imperative sentences. Last step should always verify success.
+- Triggers are comma-separated keywords for proactive matching — when a future task contains these words, this skill is suggested automatically.
+- Pitfalls are what NOT to do — negative knowledge that prevents repeating mistakes.
+- Skills track success rates across uses — proven workflows strengthen over time.
+- Existing skills can be improved: skill_search to find them, skill_add with the same name to update (version increments).
+
 ### How to Recall Knowledge
 The system injects a **knowledge catalog** and any **proven facts** (trust > 0.7) into your context. For everything else, retrieve on-demand:
 - **db_query SELECT** — precise, structured retrieval. Write SQL to get exactly what you need:
   - `SELECT content, trust_score FROM facts WHERE category='environment' AND trust_score > 0.7`
   - `SELECT w.title, f.content FROM wiki_pages w JOIN facts f ON w.category = f.category`
+  - `SELECT st.tool_name, st.tool_args, st.tool_result FROM session_turns st WHERE st.session_id=?` — review past session detail
   - Full rows, not snippets. Use this when you know what structure you need.
 - **wiki_query(query)** — fuzzy keyword search (FTS5-backed). Good when you don't know exact terms.
 - **fact_search(query)** — trust-ranked fact search. Good for quick lookups.

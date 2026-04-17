@@ -410,5 +410,72 @@
       },
       "required": ["action"]
     }
+  },
+  {
+    "name": "skill_add",
+    "description": "Crystallize a repeatable workflow into a skill. Skills are structured SOPs that improve over time through usage tracking and version evolution. Write skills when: (1) you completed a multi-step task that you'd repeat, (2) you discovered a workflow pattern worth preserving, (3) you learned pitfalls that prevent common mistakes. Format: numbered imperative steps, triggers for when to activate, pitfalls for what to avoid. Last step should always be a verification/check step.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Skill name (slug-style, e.g. 'deploy-flask-app'). Must be unique."
+        },
+        "description": {
+          "type": "string",
+          "description": "One-line summary of what this skill accomplishes"
+        },
+        "triggers": {
+          "type": "string",
+          "description": "Comma-separated keywords that indicate when to apply this skill (e.g. 'deploy,flask,ssh'). These are used for proactive skill matching — when a task contains these keywords, the skill is suggested automatically."
+        },
+        "steps": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Ordered list of imperative steps. Number each step. Last step should verify success. Example: '1. Read config file', '2. Validate schema', '3. Verify: check output matches expected'"
+        },
+        "pitfalls": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Common mistakes and anti-patterns to avoid when executing this skill"
+        },
+        "tags": {
+          "type": "string",
+          "description": "Comma-separated tags for categorization"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "default": "global",
+          "description": "Where to store: local (project-specific), global (cross-project transferable), or auto (routed by tags)"
+        }
+      },
+      "required": ["name", "description", "steps", "triggers"]
+    }
+  },
+  {
+    "name": "skill_search",
+    "description": "Search for crystallized skills/SOPs by keywords. Returns skills with steps, triggers, pitfalls, and success rates. Use before starting complex tasks to leverage proven workflows. Skills improve over time — high success_rate skills are battle-tested. Searches both local and global tiers by default.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search keywords — matches against name, description, triggers, tags"
+        },
+        "min_success": {
+          "type": "number",
+          "description": "Minimum success rate threshold (0.0-1.0)",
+          "default": 0.3
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["local", "global", "auto"],
+          "default": "global",
+          "description": "Which tier to search: local (project only), global (cross-project), auto (both)"
+        }
+      },
+      "required": ["query"]
+    }
   }
 ]

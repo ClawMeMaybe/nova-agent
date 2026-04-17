@@ -53,7 +53,8 @@ def _get_pretty_json(data):
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
-def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=40):
+def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
+                      max_turns=40, session_id=None, memory=None):
     """The core agent loop — perceive → reason → execute → remember → loop.
 
     Maintains full conversation history so the LLM always has context.
@@ -135,6 +136,30 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             response, tool_calls, tool_results, turn,
             '\n'.join(next_prompts), exit_reason
         )
+
+        # Record session turn for detailed history
+        if session_id and memory:
+            assistant_text = response.content or ""
+            thinking_text = ""
+            if "<thinking>" in assistant_text and "</thinking>" in assistant_text:
+                import re as _re
+                _tm = _re.search(r"<thinking>(.*?)</thinking>", assistant_text, _re.DOTALL)
+                if _tm:
+                    thinking_text = _tm.group(1).strip()
+            for tc in tool_calls:
+                if tc['tool_name'] != 'no_tool':
+                    memory.session_turn_add(
+                        session_id=session_id, turn_num=turn, role='assistant',
+                        content=assistant_text[:2000], tool_name=tc['tool_name'],
+                        tool_args=json.dumps(tc['args'], ensure_ascii=False)[:2000],
+                        thinking=thinking_text[:500]
+                    )
+            # Record tool results as user role turns
+            for tr in tool_results:
+                memory.session_turn_add(
+                    session_id=session_id, turn_num=turn, role='user',
+                    tool_result=tr['content'][:2000]
+                )
 
         # Build user content blocks: tool_results + continuation text
         user_content = []

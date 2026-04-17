@@ -97,6 +97,9 @@ class NovaAgent:
             if source == "user":
                 self.autonomous.mark_activity()
 
+            # Create session record at task start for detailed turn tracking
+            session_id = self.memory.session_create(raw_query)
+
             sys_prompt = build_system_prompt(self.memory)
 
             # Proactive recall: inject relevant prior knowledge into the task
@@ -105,7 +108,30 @@ class NovaAgent:
             if recall_context:
                 user_input = recall_context + "\n\n" + raw_query
 
-            handler = NovaHandler(self, self.history, self.task_dir)
+            # Proactive skill matching: suggest relevant SOPs for this task
+            skill_matches = self.memory.skill_match(raw_query)
+            if skill_matches:
+                skill_context = "\n[Relevant Skills — proven workflows for this task]\n"
+                for sk in skill_matches:
+                    tier = sk.get('_tier', 'global')
+                    skill_context += f"  **{sk['name']}** (v{sk.get('version', 1)}, success: {sk['success_rate']:.0%}) [{tier}]\n"
+                    skill_context += f"    Triggers: {sk.get('triggers', '')}\n"
+                    for step in sk['steps'][:4]:
+                        skill_context += f"    {step}\n"
+                    if len(sk['steps']) > 4:
+                        skill_context += f"    ... ({len(sk['steps']) - 4} more steps)\n"
+                    pitfalls = sk.get('pitfalls', [])
+                    if pitfalls:
+                        skill_context += f"    Pitfalls: {'; '.join(pitfalls[:2])}\n"
+                skill_context += "  Use these steps as a guide — adapt to your specific situation.\n"
+                user_input = skill_context + "\n\n" + user_input
+
+            # Proactive session context: inject relevant past session turns
+            session_context = self.memory.session_relevant_turns(raw_query)
+            if session_context:
+                user_input = session_context + "\n\n" + user_input
+
+            handler = NovaHandler(self, self.history, self.task_dir, session_id=session_id)
 
             if self.handler and 'key_info' in self.handler.working:
                 ki = self.handler.working['key_info']
@@ -117,7 +143,8 @@ class NovaAgent:
 
             gen = agent_runner_loop(
                 self.client, sys_prompt, user_input,
-                handler, self.tools_schema, max_turns=40
+                handler, self.tools_schema, max_turns=40,
+                session_id=session_id, memory=self.memory
             )
 
             try:

@@ -80,9 +80,13 @@ CREATE TABLE IF NOT EXISTS skills (
     name TEXT UNIQUE NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     steps TEXT NOT NULL DEFAULT '[]',
+    triggers TEXT NOT NULL DEFAULT '',
+    pitfalls TEXT NOT NULL DEFAULT '[]',
     success_rate REAL NOT NULL DEFAULT 0.5,
     usage_count INTEGER NOT NULL DEFAULT 0,
     tags TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    last_improved_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -106,7 +110,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
     content=facts, content_rowid=id
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
-    name, description, steps, tags,
+    name, description, steps, tags, triggers, pitfalls,
     content=skills, content_rowid=id
 );
 
@@ -134,14 +138,14 @@ CREATE TRIGGER IF NOT EXISTS facts_fts_upd AFTER UPDATE ON facts BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS skills_fts_ins AFTER INSERT ON skills BEGIN
-    INSERT INTO skills_fts(rowid,name,description,steps,tags) VALUES (new.id,new.name,new.description,new.steps,new.tags);
+    INSERT INTO skills_fts(rowid,name,description,steps,tags,triggers,pitfalls) VALUES (new.id,new.name,new.description,new.steps,new.tags,new.triggers,new.pitfalls);
 END;
 CREATE TRIGGER IF NOT EXISTS skills_fts_del AFTER DELETE ON skills BEGIN
-    INSERT INTO skills_fts(skills_fts,rowid,name,description,steps,tags) VALUES ('delete',old.id,old.name,old.description,old.steps,old.tags);
+    INSERT INTO skills_fts(skills_fts,rowid,name,description,steps,tags,triggers,pitfalls) VALUES ('delete',old.id,old.name,old.description,old.steps,old.tags,old.triggers,old.pitfalls);
 END;
 CREATE TRIGGER IF NOT EXISTS skills_fts_upd AFTER UPDATE ON skills BEGIN
-    INSERT INTO skills_fts(skills_fts,rowid,name,description,steps,tags) VALUES ('delete',old.id,old.name,old.description,old.steps,old.tags);
-    INSERT INTO skills_fts(rowid,name,description,steps,tags) VALUES (new.id,new.name,new.description,new.steps,new.tags);
+    INSERT INTO skills_fts(skills_fts,rowid,name,description,steps,tags,triggers,pitfalls) VALUES ('delete',old.id,old.name,old.description,old.steps,old.tags,old.triggers,old.pitfalls);
+    INSERT INTO skills_fts(rowid,name,description,steps,tags,triggers,pitfalls) VALUES (new.id,new.name,new.description,new.steps,new.tags,new.triggers,new.pitfalls);
 END;
 
 -- Indexes for common queries
@@ -150,6 +154,61 @@ CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_skills_success ON skills(success_rate DESC, usage_count DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_wiki_category ON wiki_pages(category);
+"""
+
+SCHEMA_V2 = """
+-- V2: Add triggers, pitfalls, version, last_improved_at to skills table
+ALTER TABLE skills ADD COLUMN triggers TEXT NOT NULL DEFAULT '';
+ALTER TABLE skills ADD COLUMN pitfalls TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE skills ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE skills ADD COLUMN last_improved_at TEXT NOT NULL DEFAULT '';
+
+-- Drop old FTS5 triggers (they reference the old column set)
+DROP TRIGGER IF EXISTS skills_fts_ins;
+DROP TRIGGER IF EXISTS skills_fts_del;
+DROP TRIGGER IF EXISTS skills_fts_upd;
+
+-- Recreate skills FTS5 to include triggers and pitfalls
+-- Note: FTS5 content= tables can't be ALTERed, so we rebuild
+DROP TABLE IF EXISTS skills_fts;
+CREATE VIRTUAL TABLE skills_fts USING fts5(
+    name, description, steps, tags, triggers, pitfalls,
+    content=skills, content_rowid=id
+);
+
+CREATE TRIGGER skills_fts_ins AFTER INSERT ON skills BEGIN
+    INSERT INTO skills_fts(rowid,name,description,steps,tags,triggers,pitfalls) VALUES (new.id,new.name,new.description,new.steps,new.tags,new.triggers,new.pitfalls);
+END;
+CREATE TRIGGER skills_fts_del AFTER DELETE ON skills BEGIN
+    INSERT INTO skills_fts(skills_fts,rowid,name,description,steps,tags,triggers,pitfalls) VALUES ('delete',old.id,old.name,old.description,old.steps,old.tags,old.triggers,old.pitfalls);
+END;
+CREATE TRIGGER skills_fts_upd AFTER UPDATE ON skills BEGIN
+    INSERT INTO skills_fts(skills_fts,rowid,name,description,steps,tags,triggers,pitfalls) VALUES ('delete',old.id,old.name,old.description,old.steps,old.tags,old.triggers,old.pitfalls);
+    INSERT INTO skills_fts(rowid,name,description,steps,tags,triggers,pitfalls) VALUES (new.id,new.name,new.description,new.steps,new.tags,new.triggers,new.pitfalls);
+END;
+
+-- Update schema version
+UPDATE _meta SET value = '2' WHERE key = 'schema_version';
+"""
+
+SCHEMA_V3 = """
+-- V3: Add session_turns table for detailed per-turn session history
+CREATE TABLE IF NOT EXISTS session_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    turn_num INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL DEFAULT '',
+    tool_args TEXT NOT NULL DEFAULT '{}',
+    tool_result TEXT NOT NULL DEFAULT '',
+    thinking TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns(session_id, turn_num);
+
+-- Update schema version
+UPDATE _meta SET value = '3' WHERE key = 'schema_version';
 """
 
 SCHEMA_SQL = SCHEMA_V1
@@ -167,7 +226,7 @@ MAX_CONTEXT_CHARS = 3000  # Context budget to avoid token overflow
 
 DBQ_ALLOWED_OPS = {'SELECT', 'INSERT', 'UPDATE'}
 DBQ_BLOCKED_KEYWORDS = {'DROP', 'ALTER', 'CREATE', 'DELETE', 'ATTACH', 'DETACH', 'PRAGMA', 'REPLACE', 'VACUUM'}
-DBQ_ALLOWED_TABLES = {'wiki_pages', 'facts', 'skills', 'sessions', '_meta'}
+DBQ_ALLOWED_TABLES = {'wiki_pages', 'facts', 'skills', 'sessions', 'session_turns', '_meta'}
 DBQ_MAX_ROWS = 50
 DBQ_MAX_CHARS = 5000
 
@@ -188,12 +247,17 @@ DEFAULT_FACTS = [
 
 DEFAULT_SKILLS = [
     ("memory_management", "How and when to update agent memory", [
-        "After completing a complex task successfully",
-        "When discovering new environment facts (paths, configs)",
-        "When a repeated task has a better workflow",
-        "Use wiki_ingest for rich knowledge, fact_add for quick facts",
-        "Never store temporary variables or unverified assumptions",
-    ], "memory,update,sop"),
+        "1. After completing a complex task successfully, distill learnings",
+        "2. When discovering environment facts (paths, configs), use fact_add",
+        "3. When a repeated task has a better workflow, use skill_add to crystallize it",
+        "4. Use wiki_ingest for rich knowledge, fact_add for quick facts",
+        "5. Never store temporary variables or unverified assumptions",
+        "6. Verify: check that stored knowledge is accurate and not redundant",
+    ], "memory,update,maintenance,knowledge",
+     "memory,update,crystallize,facts,wiki,skills,knowledge",
+     ["Don't store temporary variables or unverified assumptions",
+      "Don't duplicate existing facts — check with fact_search first",
+      "Don't skip verification step — always confirm stored knowledge is correct"]),
 ]
 
 
@@ -239,6 +303,52 @@ class NovaMemory:
     def _init_schema(self):
         self._conn.executescript(SCHEMA_SQL)
         self._conn.commit()
+        # Apply migrations if needed
+        self._apply_migrations()
+
+    def _apply_migrations(self):
+        """Apply schema migrations based on the current schema version."""
+        row = self._conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
+        current_version = int(row[0]) if row else 1
+
+        if current_version < 2:
+            # V2: Add triggers, pitfalls, version, last_improved_at to skills
+            try:
+                # Check if new columns already exist (fresh DB has them in CREATE TABLE)
+                cols = [r[1] for r in self._conn.execute("PRAGMA table_info(skills)").fetchall()]
+                needs_migration = 'triggers' not in cols
+
+                if needs_migration:
+                    self._conn.executescript(SCHEMA_V2)
+                    self._conn.commit()
+
+                    # Rebuild FTS5 content for skills (since we added new columns)
+                    self._conn.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild')")
+                    self._conn.commit()
+                else:
+                    # Fresh DB already has V2 schema — just update version marker
+                    self._conn.execute("UPDATE _meta SET value='2' WHERE key='schema_version'")
+                    self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V2 migration error: {e}")
+                # Non-critical — fresh DBs already have these columns
+
+        if current_version < 3:
+            # V3: Add session_turns table for detailed session history
+            try:
+                # Check if session_turns already exists (fresh DB has it in CREATE TABLE)
+                tables = [r[0] for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+                if 'session_turns' not in tables:
+                    self._conn.executescript(SCHEMA_V3)
+                    self._conn.commit()
+                else:
+                    # Fresh DB already has V3 schema — just update version marker
+                    self._conn.execute("UPDATE _meta SET value='3' WHERE key='schema_version'")
+                    self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V3 migration error: {e}")
 
     def _seed_defaults(self):
         if self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE slug='meta-rules'").fetchone()[0] == 0:
@@ -249,9 +359,9 @@ class NovaMemory:
                 self.fact_add(content, category=cat, tags=tags)
             except sqlite3.IntegrityError:
                 pass
-        for name, desc, steps, tags in DEFAULT_SKILLS:
+        for name, desc, steps, tags, triggers, pitfalls in DEFAULT_SKILLS:
             try:
-                self.skill_add(name, desc, steps, tags=tags)
+                self.skill_add(name, desc, steps, tags=tags, triggers=triggers, pitfalls=pitfalls)
             except sqlite3.IntegrityError:
                 pass
 
@@ -578,20 +688,22 @@ class NovaMemory:
 
     @_write_locked
     def skill_add(self, name: str, description: str, steps: list,
-                  tags: str = '', success_rate: float = 0.5) -> int:
+                  tags: str = '', success_rate: float = 0.5,
+                  triggers: str = '', pitfalls: list = None) -> int:
         steps_json = json.dumps(steps, ensure_ascii=False)
+        pitfalls_json = json.dumps(pitfalls or [], ensure_ascii=False)
         now = datetime.now().isoformat()
         try:
             cur = self._conn.execute(
-                "INSERT INTO skills (name,description,steps,success_rate,tags,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                (name, description, steps_json, success_rate, tags, now, now)
+                "INSERT INTO skills (name,description,steps,triggers,pitfalls,success_rate,tags,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (name, description, steps_json, triggers, pitfalls_json, success_rate, tags, now, now)
             )
             self._conn.commit()
             return cur.lastrowid
         except sqlite3.IntegrityError:
             self._conn.execute(
-                "UPDATE skills SET steps=?, success_rate=?, tags=?, updated_at=? WHERE name=?",
-                (steps_json, success_rate, tags, now, name)
+                "UPDATE skills SET steps=?, triggers=?, pitfalls=?, success_rate=?, tags=?, version=version+1, last_improved_at=?, updated_at=? WHERE name=?",
+                (steps_json, triggers, pitfalls_json, success_rate, tags, now, now, name)
             )
             self._conn.commit()
             return self._conn.execute("SELECT id FROM skills WHERE name=?", (name,)).fetchone()[0]
@@ -624,6 +736,7 @@ class NovaMemory:
         for r in rows:
             d = dict(r)
             d['steps'] = json.loads(d['steps'])
+            d['pitfalls'] = json.loads(d.get('pitfalls', '[]'))
             results.append(d)
         return results
 
@@ -642,6 +755,98 @@ class NovaMemory:
             )
             self._conn.commit()
 
+    @_write_locked
+    def skill_improve(self, name: str, new_steps: list = None,
+                      new_pitfalls: list = None, new_triggers: str = None) -> bool:
+        """Improve an existing skill — increments version, merges new content."""
+        skill = self._conn.execute("SELECT * FROM skills WHERE name=?", (name,)).fetchone()
+        if not skill:
+            return False
+        now = datetime.now().isoformat()
+        current_steps = json.loads(skill['steps'])
+        current_pitfalls = json.loads(skill['pitfalls'] if 'pitfalls' in skill.keys() else '[]')
+
+        if new_steps:
+            # Replace steps entirely (new version supersedes old)
+            steps_json = json.dumps(new_steps, ensure_ascii=False)
+        else:
+            steps_json = skill['steps']
+
+        if new_pitfalls:
+            # Merge pitfalls: add new ones not already present
+            existing_texts = {p.lower() for p in current_pitfalls}
+            merged = current_pitfalls + [p for p in new_pitfalls if p.lower() not in existing_texts]
+            pitfalls_json = json.dumps(merged, ensure_ascii=False)
+        else:
+            pitfalls_json = skill['pitfalls']
+
+        triggers_val = new_triggers if new_triggers is not None else (skill['triggers'] if 'triggers' in skill.keys() else '')
+
+        self._conn.execute(
+            "UPDATE skills SET steps=?, pitfalls=?, triggers=?, version=version+1, last_improved_at=?, updated_at=? WHERE name=?",
+            (steps_json, pitfalls_json, triggers_val, now, now, name)
+        )
+        self._conn.commit()
+        return True
+
+    def skill_match(self, query: str, limit: int = 2, min_success: float = 0.3) -> List[Dict]:
+        """Match skills to a task prompt — uses SQL LIKE queries against triggers, name, description, tags.
+
+        Designed for future MySQL migration — no FTS5 dependency.
+        The LLM can also query skills directly via db_query SQL:
+          SELECT * FROM skills WHERE triggers LIKE '%deploy%' AND success_rate > 0.5
+        """
+        # Extract keywords from query (skip stopwords)
+        stopwords = {'the','a','an','is','are','was','were','be','been','being',
+                     'have','has','had','do','does','did','will','would','could',
+                     'should','may','might','shall','can','need','to','of','in',
+                     'for','on','with','at','by','from','as','into','through',
+                     'during','before','after','above','below','between','out',
+                     'off','over','under','again','further','then','once','here',
+                     'there','when','where','why','how','all','both','each','few',
+                     'more','most','other','some','such','no','not','only','own',
+                     'same','so','than','too','very','just','because','but','and',
+                     'or','if','while','about','up','it','its','this','that','these',
+                     'those','i','me','my','we','our','you','your','he','him','his',
+                     'she','her','they','them','their','what','which','who','whom',
+                     'build','create','write','make','solve','fix','use','run','show',
+                     'help','tell','give','find','get','set','put','add','remove'}
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', query.lower())
+        keywords = [w for w in words if w not in stopwords]
+        if not keywords:
+            return []
+
+        # Build LIKE-based WHERE clause from keywords — matches triggers, name, description, tags
+        # Each keyword checks against all searchable fields with OR
+        # Any keyword match is sufficient (OR between keywords, not AND)
+        conditions = []
+        for kw in keywords[:5]:
+            like_val = f'%{kw}%'
+            conditions.append(
+                f"(triggers LIKE ? OR name LIKE ? OR description LIKE ? OR tags LIKE ?)"
+            )
+        where = "(" + " OR ".join(conditions) + ") AND success_rate >= ?"
+
+        # Build params — each keyword produces 4 LIKE params, plus min_success
+        params = []
+        for kw in keywords[:5]:
+            like_val = f'%{kw}%'
+            params.extend([like_val, like_val, like_val, like_val])
+        params.append(min_success)
+
+        rows = self._conn.execute(
+            f"SELECT * FROM skills WHERE {where} ORDER BY success_rate DESC, usage_count DESC LIMIT ?",
+            params + [limit]
+        ).fetchall()
+
+        results = []
+        for r in rows:
+            d = dict(r)
+            d['steps'] = json.loads(d['steps'])
+            d['pitfalls'] = json.loads(d.get('pitfalls', '[]'))
+            results.append(d)
+        return results[:limit]
+
     # ── Session Operations ──
 
     @_write_locked
@@ -655,6 +860,121 @@ class NovaMemory:
         )
         self._conn.commit()
         return cur.lastrowid
+
+    @_write_locked
+    def session_create(self, task: str) -> int:
+        """Create a session record at task start (summary/result filled later)."""
+        now = datetime.now().isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO sessions (task,summary,result,had_knowledge_output,created_at) VALUES (?,?,'',0,?)",
+            (task[:200], '', now)
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    @_write_locked
+    def session_update(self, session_id: int, summary: str = '',
+                       result: str = '', had_knowledge: bool = False):
+        """Update session record at task end with summary and result."""
+        self._conn.execute(
+            "UPDATE sessions SET summary=?, result=?, had_knowledge_output=? WHERE id=?",
+            (summary[:200], result[:500], int(had_knowledge), session_id)
+        )
+        self._conn.commit()
+
+    @_write_locked
+    def session_turn_add(self, session_id: int, turn_num: int, role: str,
+                         content: str = '', tool_name: str = '',
+                         tool_args: str = '{}', tool_result: str = '',
+                         thinking: str = '') -> int:
+        """Record a single turn in a session for detailed history."""
+        now = datetime.now().isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO session_turns (session_id,turn_num,role,content,tool_name,tool_args,tool_result,thinking,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (session_id, turn_num, role, content[:2000], tool_name,
+             json.dumps(tool_args, ensure_ascii=False)[:2000] if isinstance(tool_args, dict) else tool_args[:2000],
+             tool_result[:2000], thinking[:500], now)
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def session_turns_query(self, session_id: int, limit: int = None) -> List[Dict]:
+        """Return all turns for a given session, ordered by turn_num."""
+        sql = "SELECT * FROM session_turns WHERE session_id=? ORDER BY turn_num"
+        params = [session_id]
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def session_relevant_turns(self, task_prompt: str, max_sessions: int = 3,
+                               max_turns: int = 10) -> str:
+        """Find relevant past session turns for injecting into current task context.
+
+        Searches sessions.task for keywords from the current task prompt,
+        returns the most relevant turns from matching sessions.
+        """
+        keywords = self._extract_keywords(task_prompt)
+        if not keywords:
+            return ""
+
+        # Find matching sessions by task keywords
+        conditions = []
+        params = []
+        for kw in keywords[:4]:
+            conditions.append("task LIKE ?")
+            params.append(f'%{kw}%')
+        where = " OR ".join(conditions)
+
+        matching_sessions = self._conn.execute(
+            f"SELECT id, task, created_at FROM sessions WHERE {where} ORDER BY created_at DESC LIMIT ?",
+            params + [max_sessions]
+        ).fetchall()
+
+        if not matching_sessions:
+            return ""
+
+        context = "[Past Session Context — relevant tool calls from similar past tasks]\n"
+        total_turns = 0
+        for session in matching_sessions:
+            if total_turns >= max_turns:
+                break
+            # Get tool-call turns only (most relevant for context)
+            turns = self._conn.execute(
+                "SELECT turn_num, tool_name, tool_args, tool_result FROM session_turns "
+                "WHERE session_id=? AND tool_name != '' ORDER BY turn_num LIMIT ?",
+                (session['id'], max_turns - total_turns)
+            ).fetchall()
+
+            if turns:
+                context += f"  Session '{session['task'][:60]}' ({session['created_at'][:10]}):\n"
+                for t in turns:
+                    args_preview = t['tool_args'][:100] if t['tool_args'] else ''
+                    result_preview = t['tool_result'][:150] if t['tool_result'] else ''
+                    context += f"    Turn {t['turn_num']}: {t['tool_name']}({args_preview}) → {result_preview}\n"
+                    total_turns += 1
+
+        return context[:1500]
+
+    def _extract_keywords(self, text: str) -> List[str]:
+        """Extract meaningful keywords from text (skip stopwords)."""
+        stopwords = {'the','a','an','is','are','was','were','be','been','being',
+                     'have','has','had','do','does','did','will','would','could',
+                     'should','may','might','shall','can','need','to','of','in',
+                     'for','on','with','at','by','from','as','into','through',
+                     'during','before','after','above','below','between','out',
+                     'off','over','under','again','further','then','once','here',
+                     'there','when','where','why','how','all','both','each','few',
+                     'more','most','other','some','such','no','not','only','own',
+                     'same','so','than','too','very','just','because','but','and',
+                     'or','if','while','about','up','it','its','this','that','these',
+                     'those','i','me','my','we','our','you','your','he','him','his',
+                     'she','her','they','them','their','what','which','who','whom',
+                     'build','create','write','make','solve','fix','use','run','show',
+                     'help','tell','give','find','get','set','put','add','remove'}
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+        return [w for w in words if w not in stopwords]
 
     def session_crystallize(self, session_id: int) -> Optional[int]:
         """Fix #1: Only crystallize sessions that produced knowledge artifacts."""
@@ -679,12 +999,18 @@ class NovaMemory:
     # ── Pruning (Fix #3: prevent unbounded growth) ──
 
     def prune_old_sessions(self, max_age_days: int = 30) -> int:
-        """Delete session-log wiki pages and sessions older than max_age_days."""
+        """Delete session-log wiki pages, session_turns, and sessions older than max_age_days."""
         cutoff = datetime.now().timestamp() - max_age_days * 86400
+        cutoff_str = datetime.fromtimestamp(cutoff).isoformat()
+        # Delete session_turns for old sessions first (FK child)
+        self._conn.execute(
+            "DELETE FROM session_turns WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ?)",
+            (cutoff_str,)
+        )
         # Delete old session-log wiki pages
         old_pages = self._conn.execute(
             "SELECT slug FROM wiki_pages WHERE category='session-log' AND updated_at < ?",
-            (datetime.fromtimestamp(cutoff).isoformat(),)
+            (cutoff_str,)
         ).fetchall()
         count = 0
         for p in old_pages:
@@ -693,7 +1019,7 @@ class NovaMemory:
         # Delete old sessions with no wiki page
         old_sessions = self._conn.execute(
             "DELETE FROM sessions WHERE created_at < ? AND wiki_page_id IS NULL",
-            (datetime.fromtimestamp(cutoff).isoformat(),)
+            (cutoff_str,)
         ).rowcount
         count += old_sessions
         self._conn.commit()
@@ -1134,9 +1460,12 @@ class TwoTierMemory:
 
     def skill_add(self, name: str, description: str, steps: list,
                   tags: str = '', success_rate: float = 0.5,
+                  triggers: str = '', pitfalls: list = None,
                   tier: str = 'global') -> int:
+        self._mark_knowledge_produced()
         target = self._target(tier)
-        return target.skill_add(name, description, steps, tags=tags, success_rate=success_rate)
+        return target.skill_add(name, description, steps, tags=tags, success_rate=success_rate,
+                                triggers=triggers, pitfalls=pitfalls)
 
     def skill_search(self, query: str, min_success: float = 0.3,
                      limit: int = 5, tier: str = 'auto') -> List[Dict]:
@@ -1163,11 +1492,57 @@ class TwoTierMemory:
             except:
                 pass
 
+    def skill_improve(self, name: str, new_steps: list = None,
+                      new_pitfalls: list = None, new_triggers: str = None,
+                      tier: str = 'global') -> bool:
+        target = self._target(tier)
+        return target.skill_improve(name, new_steps=new_steps,
+                                    new_pitfalls=new_pitfalls, new_triggers=new_triggers)
+
+    def skill_match(self, query: str, limit: int = 2, min_success: float = 0.3) -> List[Dict]:
+        """Proactive skill matching — searches both tiers using SQL LIKE queries."""
+        results = []
+        seen_names = set()
+        # Global first (skills default to global tier)
+        for s in self._global.skill_match(query, limit=limit, min_success=min_success):
+            if s['name'] not in seen_names:
+                s['_tier'] = 'global'
+                results.append(s)
+                seen_names.add(s['name'])
+        if len(results) < limit:
+            for s in self._local.skill_match(query, limit=limit, min_success=min_success):
+                if s['name'] not in seen_names:
+                    s['_tier'] = 'local'
+                    results.append(s)
+                    seen_names.add(s['name'])
+        return results[:limit]
+
     # ── Session Operations ──
 
     def session_archive(self, task: str, summary: str, result: str) -> int:
         return self._local.session_archive(task, summary, result,
                                            had_knowledge=self._knowledge_produced)
+
+    def session_create(self, task: str) -> int:
+        return self._local.session_create(task)
+
+    def session_update(self, session_id: int, summary: str = '',
+                       result: str = '', had_knowledge: bool = False):
+        self._local.session_update(session_id, summary, result, had_knowledge)
+
+    def session_turn_add(self, session_id: int, turn_num: int, role: str,
+                         content: str = '', tool_name: str = '',
+                         tool_args: str = '{}', tool_result: str = '',
+                         thinking: str = '') -> int:
+        return self._local.session_turn_add(session_id, turn_num, role, content,
+                                            tool_name, tool_args, tool_result, thinking)
+
+    def session_turns_query(self, session_id: int, limit: int = None) -> List[Dict]:
+        return self._local.session_turns_query(session_id, limit)
+
+    def session_relevant_turns(self, task_prompt: str, max_sessions: int = 3,
+                               max_turns: int = 10) -> str:
+        return self._local.session_relevant_turns(task_prompt, max_sessions, max_turns)
 
     def session_crystallize(self, session_id: int) -> Optional[int]:
         return self._local.session_crystallize(session_id)

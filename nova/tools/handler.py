@@ -191,7 +191,7 @@ def get_global_memory():
 class NovaHandler(BaseHandler):
     """Nova Agent tool handler — implements all atomic + memory + wiki/fact tools."""
 
-    def __init__(self, parent, last_history=None, cwd='./temp'):
+    def __init__(self, parent, last_history=None, cwd='./temp', session_id=None):
         self.parent = parent
         self.working = {}
         self.cwd = cwd
@@ -200,6 +200,8 @@ class NovaHandler(BaseHandler):
         self.code_stop_signal = []
         self.memory = parent.memory  # NovaMemory instance
         self._accessed_fact_ids = []  # Track facts accessed during this task
+        self._accessed_skill_names = []  # Track skills used during this task
+        self._session_id = session_id
 
     def _get_abs_path(self, path):
         if not path:
@@ -310,6 +312,7 @@ class NovaHandler(BaseHandler):
         prompt = "### [Distill Experience] Extract verified, durable knowledge from this task:\n"
         prompt += "- **Quick facts** (paths/credentials/config) → use fact_add\n"
         prompt += "- **Rich knowledge** (architecture decisions, debugging patterns) → use wiki_ingest\n"
+        prompt += "- **Repeatable workflows** (multi-step procedures you'd do again) → use skill_add with numbered steps, triggers, and pitfalls\n"
         prompt += "- **Complex task experience** (key pitfalls/workflows) → use wiki_ingest with category=pattern\n"
         prompt += "- **Prohibited**: temporary variables, unverified info, common knowledge.\n"
         prompt += f"\nCurrent category hint: {category}\n"
@@ -565,6 +568,82 @@ class NovaHandler(BaseHandler):
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
 
+    # ── Skill Tools ──
+
+    def do_skill_add(self, args, response):
+        """Crystallize a repeatable workflow into a skill/SOP."""
+        name = args.get("name", "")
+        description = args.get("description", "")
+        steps = args.get("steps", [])
+        triggers = args.get("triggers", "")
+        pitfalls = args.get("pitfalls", [])
+        tags = args.get("tags", "")
+        tier = args.get("tier", "global")
+
+        if not name or not steps or not triggers:
+            return StepOutcome({"status": "error", "msg": "name, steps, and triggers are required"}, next_prompt="\n")
+
+        try:
+            skill_id = self.memory.skill_add(
+                name, description, steps,
+                tags=tags, triggers=triggers, pitfalls=pitfalls,
+                tier=tier
+            )
+            result = {
+                "status": "success",
+                "msg": f"Skill '{name}' created (id={skill_id}, version=1). Triggers: {triggers}. Steps: {len(steps)}. Pitfalls: {len(pitfalls)}.",
+                "skill_id": skill_id,
+            }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_skill_search(self, args, response):
+        """Search for crystallized skills/SOPs by keywords."""
+        query = args.get("query", "")
+        min_success = args.get("min_success", 0.3)
+        tier = args.get("tier", "global")
+
+        if not query:
+            return StepOutcome({"status": "error", "msg": "Query required"}, next_prompt="\n")
+
+        try:
+            skills = self.memory.skill_search(query, min_success=min_success, tier=tier)
+            # Track accessed skill names for success feedback
+            for s in skills:
+                if 'name' in s:
+                    self._accessed_skill_names.append(s['name'])
+            if not skills:
+                result = {"status": "no_results", "msg": f"No skills matching '{query}' above success {min_success}"}
+            else:
+                summaries = []
+                for s in skills:
+                    tier_label = s.get('_tier', tier)
+                    summary = f"**{s['name']}** (v{s.get('version', 1)}, success: {s['success_rate']:.0%}, used {s['usage_count']}x) [{tier_label}]\n"
+                    summary += f"  Description: {s['description']}\n"
+                    summary += f"  Triggers: {s.get('triggers', '')}\n"
+                    summary += f"  Steps:\n"
+                    for step in s['steps'][:6]:
+                        summary += f"    {step}\n"
+                    if len(s['steps']) > 6:
+                        summary += f"    ... ({len(s['steps']) - 6} more steps)\n"
+                    pitfalls = s.get('pitfalls', [])
+                    if pitfalls:
+                        summary += f"  Pitfalls: {'; '.join(pitfalls[:3])}\n"
+                    summaries.append(summary)
+                result = {
+                    "status": "success",
+                    "msg": f"Found {len(skills)} skills",
+                    "skills": summaries,
+                }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
     # ── Meta tool ──
 
     def do_no_tool(self, args, response):
@@ -604,6 +683,12 @@ class NovaHandler(BaseHandler):
                     self.memory.fact_mark_helpful_by_id(fid)
                 except:
                     pass
+            # Skill success feedback: mark accessed skills as successful
+            for skill_name in self._accessed_skill_names:
+                try:
+                    self.memory.skill_update_success(skill_name, success=True)
+                except:
+                    pass
 
         if turn % 7 == 0:
             next_prompt += f"\n[DANGER] Turn {turn}: If no progress, switch strategy or ask_user."
@@ -614,7 +699,18 @@ class NovaHandler(BaseHandler):
             data = exit_reason.get('data', '')
             if not isinstance(data, str):
                 data = str(data)[:500]
-            self.memory.archive_session(summary, task_desc, data)
+            had_knowledge = self.memory._knowledge_produced
+            if self._session_id:
+                # Session was created at task start — just update it
+                self.memory.session_update(
+                    self._session_id, summary=task_desc, result=data,
+                    had_knowledge=had_knowledge
+                )
+                # Crystallize the existing session (creates wiki page)
+                self.memory.session_crystallize(self._session_id)
+            else:
+                # No session_id — use old archive_session flow
+                self.memory.archive_session(task_desc, task_desc, data)
 
             # Apply trust decay on session end (lightweight maintenance)
             try:
