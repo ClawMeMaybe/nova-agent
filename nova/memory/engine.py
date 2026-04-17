@@ -211,6 +211,28 @@ CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns(session_id
 UPDATE _meta SET value = '3' WHERE key = 'schema_version';
 """
 
+SCHEMA_V4 = """
+-- V4: Add evolution_log table for gradient-descent self-evolution tracking
+CREATE TABLE IF NOT EXISTS evolution_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    loss_task REAL NOT NULL,
+    loss_efficiency REAL NOT NULL,
+    loss_recurrence REAL NOT NULL DEFAULT 0,
+    loss_knowledge_quality REAL NOT NULL DEFAULT 0,
+    loss_total REAL NOT NULL,
+    evolution_score REAL NOT NULL,
+    gradient_facts TEXT NOT NULL DEFAULT '[]',
+    gradient_skills TEXT NOT NULL DEFAULT '[]',
+    improvement_targets TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evolution_log_score ON evolution_log(evolution_score DESC);
+
+-- Update schema version
+UPDATE _meta SET value = '4' WHERE key = 'schema_version';
+"""
+
 SCHEMA_SQL = SCHEMA_V1
 
 # ── Constants ──
@@ -226,7 +248,7 @@ MAX_CONTEXT_CHARS = 3000  # Context budget to avoid token overflow
 
 DBQ_ALLOWED_OPS = {'SELECT', 'INSERT', 'UPDATE'}
 DBQ_BLOCKED_KEYWORDS = {'DROP', 'ALTER', 'CREATE', 'DELETE', 'ATTACH', 'DETACH', 'PRAGMA', 'REPLACE', 'VACUUM'}
-DBQ_ALLOWED_TABLES = {'wiki_pages', 'facts', 'skills', 'sessions', 'session_turns', '_meta'}
+DBQ_ALLOWED_TABLES = {'wiki_pages', 'facts', 'skills', 'sessions', 'session_turns', 'evolution_log', '_meta'}
 DBQ_MAX_ROWS = 50
 DBQ_MAX_CHARS = 5000
 
@@ -349,6 +371,21 @@ class NovaMemory:
                     self._conn.commit()
             except Exception as e:
                 print(f"[Migration] V3 migration error: {e}")
+
+        if current_version < 4:
+            # V4: Add evolution_log table for gradient-descent tracking
+            try:
+                tables = [r[0] for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+                if 'evolution_log' not in tables:
+                    self._conn.executescript(SCHEMA_V4)
+                    self._conn.commit()
+                else:
+                    self._conn.execute("UPDATE _meta SET value='4' WHERE key='schema_version'")
+                    self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V4 migration error: {e}")
 
     def _seed_defaults(self):
         if self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE slug='meta-rules'").fetchone()[0] == 0:
@@ -957,6 +994,159 @@ class NovaMemory:
 
         return context[:1500]
 
+    # ── Evolution Loss & Gradient Descent ──
+
+    def compute_evolution_loss(self, session_id: int, turns_used: int,
+                               max_turns: int, task_success: bool,
+                               accessed_fact_ids: List[int],
+                               accessed_skill_names: List[str]) -> Dict:
+        """Compute per-session evolution loss and gradient direction.
+
+        The loss measures how effectively knowledge served task completion.
+        The gradient identifies which knowledge contributed positively/negatively.
+        This mirrors gradient descent: loss → direction → parameter update.
+        """
+        # loss_task: 0 if success, 1 if fail
+        loss_task = 0.0 if task_success else 1.0
+
+        # loss_efficiency: normalized turns (0 = instant, 1 = max_turns used)
+        loss_efficiency = turns_used / max_turns
+
+        # loss_recurrence: weighted penalty if similar task failed before
+        session = self._conn.execute("SELECT task FROM sessions WHERE id=?", (session_id,)).fetchone()
+        keywords = self._extract_keywords(session['task'] if session else '')
+        recurrence = 0.0
+        for kw in keywords[:3]:
+            past_failures = self._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE task LIKE ? AND result NOT LIKE '%200%' AND result NOT LIKE '%success%'",
+                (f'%{kw}%',)
+            ).fetchone()[0]
+            recurrence += past_failures * 0.1
+        loss_recurrence = min(recurrence, 1.0)
+
+        # loss_knowledge_quality: (1 - helpful_ratio) of accessed facts
+        if accessed_fact_ids:
+            helpful = 0
+            for fid in accessed_fact_ids:
+                fact = self._conn.execute("SELECT helpful_count, unhelpful_count FROM facts WHERE id=?", (fid,)).fetchone()
+                if fact and fact['helpful_count'] > fact['unhelpful_count']:
+                    helpful += 1
+            helpful_ratio = helpful / len(accessed_fact_ids)
+        else:
+            helpful_ratio = 0.5  # neutral when no facts accessed
+        loss_knowledge_quality = 1.0 - helpful_ratio
+
+        # Weighted total loss
+        loss_total = loss_task + 0.3 * loss_efficiency + 0.5 * loss_recurrence + 0.2 * loss_knowledge_quality
+
+        # Compute gradient direction — which knowledge contributed which way
+        gradient_facts = []
+        for fid in accessed_fact_ids:
+            fact = self._conn.execute("SELECT content, trust_score FROM facts WHERE id=?", (fid,)).fetchone()
+            if fact:
+                direction = '+' if task_success else '-'
+                magnitude = abs(loss_total * 0.1)
+                gradient_facts.append({'id': fid, 'direction': direction, 'magnitude': round(magnitude, 3)})
+
+        gradient_skills = []
+        for sname in accessed_skill_names:
+            skill = self._conn.execute("SELECT success_rate FROM skills WHERE name=?", (sname,)).fetchone()
+            if skill:
+                direction = '+' if task_success else '-'
+                magnitude = abs(loss_total * 0.2)
+                gradient_skills.append({'name': sname, 'direction': direction, 'magnitude': round(magnitude, 3)})
+
+        # Improvement targets: skills with negative gradient
+        improvement_targets = [g['name'] for g in gradient_skills if g['direction'] == '-']
+
+        # Evolution score (inverse of rolling average loss over last 5 sessions)
+        recent_losses = self._conn.execute(
+            "SELECT loss_total FROM evolution_log ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+        if recent_losses:
+            avg_loss = sum(r[0] for r in recent_losses) / len(recent_losses)
+        else:
+            avg_loss = loss_total
+        evolution_score = round(1.0 - min(avg_loss / 2.0, 1.0), 3)  # normalize: max loss ~2.0
+
+        return {
+            'loss_task': loss_task,
+            'loss_efficiency': loss_efficiency,
+            'loss_recurrence': loss_recurrence,
+            'loss_knowledge_quality': loss_knowledge_quality,
+            'loss_total': loss_total,
+            'evolution_score': evolution_score,
+            'gradient_facts': gradient_facts,
+            'gradient_skills': gradient_skills,
+            'improvement_targets': improvement_targets,
+        }
+
+    @_write_locked
+    def evolution_log_add(self, session_id: int, loss_data: Dict) -> int:
+        """Persist computed evolution loss to the evolution_log table."""
+        now = datetime.now().isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO evolution_log (session_id,loss_task,loss_efficiency,loss_recurrence,"
+            "loss_knowledge_quality,loss_total,evolution_score,gradient_facts,gradient_skills,"
+            "improvement_targets,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, loss_data['loss_task'], loss_data['loss_efficiency'],
+             loss_data['loss_recurrence'], loss_data['loss_knowledge_quality'],
+             loss_data['loss_total'], loss_data['evolution_score'],
+             json.dumps(loss_data['gradient_facts'], ensure_ascii=False),
+             json.dumps(loss_data['gradient_skills'], ensure_ascii=False),
+             json.dumps(loss_data['improvement_targets'], ensure_ascii=False), now)
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    @_write_locked
+    def apply_gradient(self, loss_data: Dict):
+        """Apply gradient descent step — update knowledge parameters proportional to loss.
+
+        Key innovation: instead of flat +0.05/-0.10, magnitude scales with loss_total.
+        High-loss sessions → stronger updates (fast learning).
+        Low-loss sessions → gentle updates (fine-tuning).
+        """
+        for g in loss_data['gradient_facts']:
+            if g['direction'] == '+':
+                self._conn.execute(
+                    "UPDATE facts SET trust_score=MIN(trust_score+?, 1.0) WHERE id=?",
+                    (g['magnitude'], g['id'])
+                )
+            else:
+                # 2x penalty: negative direction hurts more than positive helps
+                self._conn.execute(
+                    "UPDATE facts SET trust_score=MAX(trust_score-?, 0.0) WHERE id=?",
+                    (g['magnitude'] * 2, g['id'])
+                )
+
+        for g in loss_data['gradient_skills']:
+            if g['direction'] == '+':
+                self.skill_update_success(g['name'], success=True)
+            else:
+                self.skill_update_success(g['name'], success=False)
+
+        self._conn.commit()
+
+    def evolution_score(self) -> Tuple[float, float]:
+        """Return current evolution_score and trend direction.
+
+        trend > 0: improving, < 0: degrading, 0: stable
+        """
+        rows = self._conn.execute(
+            "SELECT evolution_score, created_at FROM evolution_log ORDER BY created_at DESC LIMIT 10"
+        ).fetchall()
+        if not rows:
+            return 0.5, 0.0  # Default: unknown, neutral trend
+
+        current_score = rows[0]['evolution_score']
+        if len(rows) >= 2:
+            older_score = rows[-1]['evolution_score']
+            trend = current_score - older_score
+        else:
+            trend = 0.0
+        return current_score, trend
+
     def _extract_keywords(self, text: str) -> List[str]:
         """Extract meaningful keywords from text (skip stopwords)."""
         stopwords = {'the','a','an','is','are','was','were','be','been','being',
@@ -1200,12 +1390,15 @@ class NovaMemory:
     # ── Stats ──
 
     def stats(self) -> Dict:
+        ev_score, ev_trend = self.evolution_score()
         return {
             'wiki_pages': self.count_wiki_pages(),
             'facts': self.count_facts(),
             'skills': self.count_skills(),
             'sessions': self.count_sessions(),
             'avg_trust': self.avg_trust(),
+            'evolution_score': ev_score,
+            'evolution_trend': ev_trend,
         }
 
     # ── SQL Sandbox (LLM-as-DBA) ──
@@ -1547,6 +1740,25 @@ class TwoTierMemory:
     def session_crystallize(self, session_id: int) -> Optional[int]:
         return self._local.session_crystallize(session_id)
 
+    # ── Evolution Operations ──
+
+    def compute_evolution_loss(self, session_id: int, turns_used: int,
+                               max_turns: int, task_success: bool,
+                               accessed_fact_ids: list = None,
+                               accessed_skill_names: list = None) -> Dict:
+        return self._local.compute_evolution_loss(session_id, turns_used, max_turns,
+                                                   task_success, accessed_fact_ids,
+                                                   accessed_skill_names)
+
+    def evolution_log_add(self, session_id: int, loss_data: Dict) -> int:
+        return self._local.evolution_log_add(session_id, loss_data)
+
+    def apply_gradient(self, loss_data: Dict):
+        self._local.apply_gradient(loss_data)
+
+    def evolution_score(self) -> Tuple[float, float]:
+        return self._local.evolution_score()
+
     # ── Pruning ──
 
     def prune(self, max_age_days: int = 30) -> Dict:
@@ -1727,6 +1939,8 @@ class TwoTierMemory:
             'global_skills': gs['skills'],
             'global_sessions': gs['sessions'],
             'global_avg_trust': gs['avg_trust'],
+            'evolution_score': ls['evolution_score'],
+            'evolution_trend': ls['evolution_trend'],
         }
 
     # ── SQL Sandbox (LLM-as-DBA) ──

@@ -218,6 +218,26 @@ class NovaAgent:
                 else:
                     print("No autonomous TODO yet. Agent will create one during idle self-improvement.")
                 continue
+            if q == '/evolve':
+                score, trend = self.memory.evolution_score()
+                trend_arrow = '↑' if trend > 0 else '↓' if trend < 0 else '—'
+                print(f"Evolution Score: {score:.2f} (trend: {trend_arrow})")
+                try:
+                    recent = self.memory._local._conn.execute(
+                        "SELECT loss_task, loss_efficiency, loss_recurrence, loss_knowledge_quality, "
+                        "loss_total, evolution_score, created_at "
+                        "FROM evolution_log ORDER BY created_at DESC LIMIT 5"
+                    ).fetchall()
+                    if recent:
+                        for r in recent:
+                            print(f"  [{r['created_at'][:10]}] L_task={r['loss_task']:.1f} L_eff={r['loss_efficiency']:.2f} "
+                                  f"L_rec={r['loss_recurrence']:.2f} L_kq={r['loss_knowledge_quality']:.2f} "
+                                  f"L_total={r['loss_total']:.2f} score={r['evolution_score']:.2f}")
+                    else:
+                        print("  No evolution log entries yet. Complete a task to start tracking.")
+                except Exception:
+                    print("  Evolution log not yet available (needs V4 schema migration).")
+                continue
 
             dq = self.put_task(q)
             while True:

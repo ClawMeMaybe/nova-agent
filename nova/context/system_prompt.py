@@ -26,7 +26,9 @@ You have a two-tier SQLite knowledge base that persists across sessions:
 - **Local** (<project>/.nova/nova.db): project-specific paths, configs, debugging notes, sessions
 - **Global** (~/.nova/nova.db): cross-project patterns, conventions, decisions, reusable skills
 
-Tables: wiki_pages (rich knowledge pages), facts (atomic verified facts with trust scores), skills (SOPs with success rates), sessions (task archives).
+Tables: wiki_pages (rich knowledge pages), facts (atomic verified facts with trust scores), skills (SOPs with success rates), sessions (task archives), evolution_log (loss function tracking self-evolution).
+
+Evolution score measures overall performance trend: 1 - avg(loss) over recent sessions. Check /evolve for details. When declining, autonomous mode prioritizes skills flagged by the gradient.
 
 ### How to Remember Knowledge
 Use whichever tool fits the moment:

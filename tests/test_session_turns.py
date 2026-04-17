@@ -56,7 +56,7 @@ class TestSessionTurnsSchema:
         mem = NovaMemory(db_path)
         row = mem._conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
         mem.close()
-        assert row[0] == '3'
+        assert int(row[0]) >= 3
 
     def test_v2_db_migrates_to_v3(self, tmp_path):
         db_path = str(tmp_path / ".nova" / "nova.db")
@@ -128,7 +128,7 @@ class TestSessionTurnsSchema:
         mem.close()
 
         assert 'session_turns' in tables_after
-        assert version == '3'
+        assert int(version) >= 3
 
     def test_db_query_can_select_session_turns(self, local_memory):
         sid = local_memory.session_create("test task")

@@ -719,6 +719,28 @@ class NovaHandler(BaseHandler):
             except:
                 pass
 
+            # Evolution loss: compute, log, and apply gradient
+            if self._session_id:
+                try:
+                    task_success = exit_reason.get('result') in ('EXITED', 'CURRENT_TASK_DONE')
+                    loss_data = self.memory.compute_evolution_loss(
+                        session_id=self._session_id,
+                        turns_used=turn,
+                        max_turns=40,
+                        task_success=task_success,
+                        accessed_fact_ids=self._accessed_fact_ids,
+                        accessed_skill_names=self._accessed_skill_names,
+                    )
+                    self.memory.evolution_log_add(self._session_id, loss_data)
+                    self.memory.apply_gradient(loss_data)
+
+                    if loss_data['improvement_targets']:
+                        next_prompt += f"\n[Evolution] Negative gradient on: {', '.join(loss_data['improvement_targets'])}. "
+                        next_prompt += f"Evolution score: {loss_data['evolution_score']:.2f}. "
+                        next_prompt += "Autonomous mode should prioritize improving these skills."
+                except Exception as e:
+                    print(f"[Evolution] Error computing loss: {e}")
+
         # Crystallization nudge — remind the agent to save knowledge before finishing
         if exit_reason and exit_reason.get('result') == 'CURRENT_TASK_DONE':
             next_prompt += "\n[Nudge] Before finishing, consider crystallizing what you learned. Use wiki_ingest for rich knowledge, fact_add for quick facts."

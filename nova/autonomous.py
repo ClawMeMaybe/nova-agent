@@ -75,7 +75,18 @@ class AutonomousMonitor:
         prompt += "## Memory Stats\n"
         prompt += f"- Local: {stats['local_wiki_pages']} wiki, {stats['local_facts']} facts, {stats['local_skills']} skills\n"
         prompt += f"- Global: {stats['global_wiki_pages']} wiki, {stats['global_facts']} facts, {stats['global_skills']} skills\n"
-        prompt += f"- Avg trust (local): {stats['local_avg_trust']:.2f}, (global): {stats['global_avg_trust']:.2f}\n\n"
+        prompt += f"- Avg trust (local): {stats['local_avg_trust']:.2f}, (global): {stats['global_avg_trust']:.2f}\n"
+        prompt += f"- Evolution score: {stats['evolution_score']:.2f} (trend: {'↑' if stats['evolution_trend'] > 0 else '↓' if stats['evolution_trend'] < 0 else '—'})\n\n"
+
+        # Evolution gradient direction — prioritize improvement targets from loss function
+        if stats['evolution_trend'] < 0:
+            prompt += "## Evolution Gradient (DECLINING — prioritize improvement)\n"
+            prompt += "Evolution score is declining. Focus on skills that contributed to recent failures.\n"
+            prompt += "Check `db_query SELECT improvement_targets,loss_total FROM evolution_log ORDER BY created_at DESC LIMIT 1` for gradient targets.\n"
+            prompt += "Priority formula: improvement_targets × loss_magnitude → fix highest-loss skill first.\n\n"
+        elif stats['evolution_score'] < 0.5:
+            prompt += "## Evolution Gradient (LOW — room for improvement)\n"
+            prompt += "Evolution score is below 0.5. Consider refining skills and adding missing knowledge.\n\n"
 
         if todo_content.strip():
             prompt += "## Existing TODO (from autonomous-todo wiki page)\n"
