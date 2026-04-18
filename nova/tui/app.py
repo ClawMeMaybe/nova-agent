@@ -36,16 +36,20 @@ class NovaApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Start agent background thread
+        threading.Thread(target=self.agent.run, daemon=True).start()
+        self.agent.cron.start()
+        self.agent.autonomous.start()
+
+        # Start event polling (100ms interval)
+        self._poll_handle = self.set_interval(0.1, self._poll_events)
+
+        # Defer startup message — widgets may not be fully ready at on_mount
+        self.call_later(self._show_startup)
+
+    def _show_startup(self) -> None:
+        """Show startup message after widgets are fully mounted."""
         try:
-            # Start agent background thread
-            threading.Thread(target=self.agent.run, daemon=True).start()
-            self.agent.cron.start()
-            self.agent.autonomous.start()
-
-            # Start event polling (100ms interval)
-            self._poll_handle = self.set_interval(0.1, self._poll_events)
-
-            # Show startup message in chat
             chat = self.query_one("#chat-panel")
             from nova import __version__
             stats = self.agent.memory.stats()
@@ -57,12 +61,13 @@ class NovaApp(App):
 Type your message, or `/help` for commands."""
             chat.add_agent_response(startup_msg)
         except Exception as e:
-            logger.error(f"on_mount error: {e}")
+            logger.error(f"startup message error: {e}")
+            # Fallback: write plain text directly
             try:
                 chat = self.query_one("#chat-panel")
-                chat.add_error(f"Startup error: {e}")
-            except Exception:
-                pass
+                chat.write(f"Nova Agent started (fallback display)")
+            except Exception as e2:
+                logger.error(f"fallback write also failed: {e2}")
 
     def _poll_events(self) -> None:
         """Process all queued events from the agent."""
