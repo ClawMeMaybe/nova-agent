@@ -5,10 +5,10 @@ import threading
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.widgets import Header, Footer
 
 from nova.events import AgentEvent
 from nova.tui.screens.chat import ChatScreen
-from nova.tui.styles.theme import get_theme_css
 from nova.tui.widgets.dialog import AskUserDialog
 
 logger = logging.getLogger("nova")
@@ -19,12 +19,6 @@ class NovaApp(App):
 
     TITLE = "Nova Agent"
     SUB_TITLE = "Self-evolving AI assistant"
-
-    CSS = """
-    Screen {
-        background: $background;
-    }
-    """
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=True),
@@ -37,7 +31,9 @@ class NovaApp(App):
         self._poll_handle = None
 
     def compose(self) -> ComposeResult:
+        yield Header()
         yield ChatScreen()
+        yield Footer()
 
     def on_mount(self) -> None:
         try:
@@ -62,7 +58,6 @@ Type your message, or `/help` for commands."""
             chat.add_agent_response(startup_msg)
         except Exception as e:
             logger.error(f"on_mount error: {e}")
-            # Try to show error in chat if possible
             try:
                 chat = self.query_one("#chat-panel")
                 chat.add_error(f"Startup error: {e}")
