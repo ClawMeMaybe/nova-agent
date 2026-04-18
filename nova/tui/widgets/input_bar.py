@@ -22,7 +22,7 @@ class InputBar(Container):
     DEFAULT_CSS = """
     InputBar {
         layout: horizontal;
-        background: $input-bg;
+        background: $panel;
         border-top: solid $border;
         height: 3;
         padding: 0 1;
@@ -30,11 +30,11 @@ class InputBar(Container):
     InputBar Input {
         width: 1fr;
         height: 1;
-        background: $input-bg;
+        background: $panel;
         border: none;
     }
     InputBar:focus-within Input {
-        border: solid $input-focus;
+        border: solid $primary;
     }
     """
 
