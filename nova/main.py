@@ -141,20 +141,29 @@ class NovaAgent:
             with self.lock:
                 self.handler = handler
 
-            gen = agent_runner_loop(
-                self.client, sys_prompt, user_input,
-                handler, self.tools_schema, max_turns=40,
-                session_id=session_id, memory=self.memory
-            )
-
             try:
-                full_resp = ""
-                for chunk in gen:
-                    if self.stop_sig:
-                        break
-                    full_resp += chunk
-                    display_queue.put({'next': chunk, 'source': source})
+                result = agent_runner_loop(
+                    self.client, sys_prompt, user_input,
+                    handler, self.tools_schema, max_turns=40,
+                    session_id=session_id, memory=self.memory
+                )
 
+                # Extract final response from the result dict
+                result_data = result.get('data', '')
+                if hasattr(result_data, 'content'):
+                    # LLMResponse object — extract the text content
+                    full_resp = result_data.content or ''
+                elif isinstance(result_data, dict):
+                    full_resp = json.dumps(result_data, ensure_ascii=False)
+                else:
+                    full_resp = str(result_data) if result_data else ''
+
+                # Use handler history for rich context
+                handler_summary = handler.history_info
+                if handler_summary:
+                    full_resp = '\n'.join(handler_summary) + '\n\n' + full_resp
+
+                display_queue.put({'next': full_resp, 'source': source})
                 display_queue.put({'done': full_resp, 'source': source})
                 self.history = handler.history_info
 

@@ -1,6 +1,6 @@
 """Nova gateway — multi-platform messaging channels.
 
-Supports Telegram, Discord, and a simple HTTP webhook.
+Supports Telegram, Discord, WeCom (企业微信), Feishu, QQ, DingTalk, and HTTP webhook.
 Each channel runs as an independent process connecting to the shared NovaAgent.
 """
 
