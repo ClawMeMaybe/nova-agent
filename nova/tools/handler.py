@@ -5,7 +5,9 @@ Inspired by GenericAgent's GenericAgentHandler with enhancements from Hermes.
 """
 
 import json
+import logging
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -18,7 +20,10 @@ import itertools
 import collections
 
 from nova.agent_loop import BaseHandler, StepOutcome
+from nova.events import AgentEvent
 from nova.memory.engine import TwoTierMemory
+
+logger = logging.getLogger("nova")
 
 
 def smart_format(data, max_str_len=100, omit_str=' ... '):
@@ -41,7 +46,7 @@ def format_error(e):
 def code_run(code, code_type="python", timeout=60, cwd=None, stop_signal=[]):
     """Execute code — python scripts or bash commands."""
     preview = (code[:60].replace('\n', ' ') + '...') if len(code) > 60 else code.strip()
-    print(f"[Action] Running {code_type}: {preview}")
+    logger.debug(f"Running {code_type}: {preview}")
 
     if code_type == "python":
         tmp_file = tempfile.NamedTemporaryFile(suffix=".nova.py", delete=False, mode='w', encoding='utf-8')
@@ -198,9 +203,11 @@ class NovaHandler(BaseHandler):
         self.current_turn = 0
         self.history_info = last_history if last_history else []
         self.code_stop_signal = []
-        self.memory = parent.memory  # NovaMemory instance
-        self._accessed_fact_ids = []  # Track facts accessed during this task
-        self._accessed_skill_names = []  # Track skills used during this task
+        self.memory = parent.memory
+        self.events = parent.events if hasattr(parent, 'events') else None
+        self._ask_response_queue = queue.Queue()
+        self._accessed_fact_ids = []
+        self._accessed_skill_names = []
         self._session_id = session_id
 
     def _get_abs_path(self, path):
@@ -237,8 +244,25 @@ class NovaHandler(BaseHandler):
         """Ask the user a question — human-in-the-loop."""
         question = args.get("question", "Please provide input:")
         candidates = args.get("candidates", [])
-        result = ask_user(question, candidates)
-        return StepOutcome(result, next_prompt="", should_exit=True)
+
+        # Emit event for TUI dialog — agent waits for response
+        if self.events:
+            self.events.emit(AgentEvent.ASK_USER, {"question": question, "candidates": candidates})
+            # Wait for user answer from TUI dialog (timeout 300s)
+            try:
+                answer = self._ask_response_queue.get(timeout=300)
+                if answer == "__timeout__":
+                    result = ask_user(question, candidates)
+                    return StepOutcome(result, next_prompt="\n[System] User did not respond. Proceeding with default.", should_exit=True)
+                # Inject answer as continuation prompt
+                return StepOutcome({"status": "answered", "answer": answer}, next_prompt=f"\n[User Response] {answer}\n")
+            except queue.Empty:
+                result = ask_user(question, candidates)
+                return StepOutcome(result, next_prompt="", should_exit=True)
+        else:
+            # Raw REPL mode — use original behavior
+            result = ask_user(question, candidates)
+            return StepOutcome(result, next_prompt="", should_exit=True)
 
     def do_file_read(self, args, response):
         """Read file content with optional keyword search."""
@@ -730,7 +754,7 @@ class NovaHandler(BaseHandler):
                     next_prompt += f"Evolution score: {loss_data['evolution_score']:.2f}. "
                     next_prompt += "Autonomous mode should prioritize improving these skills."
             except Exception as e:
-                print(f"[Evolution] Error computing loss: {e}")
+                logger.error(f"Evolution loss error: {e}")
 
         # Crystallization nudge — remind the agent to save knowledge before finishing
         if exit_reason and exit_reason.get('result') == 'CURRENT_TASK_DONE':

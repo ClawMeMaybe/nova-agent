@@ -4,6 +4,7 @@ Two-tier memory: project-local (<cwd>/.nova/nova.db) + global (~/.nova/nova.db).
 """
 
 import json
+import logging
 import os
 import re
 import sys
@@ -13,12 +14,15 @@ import queue
 
 from nova import __version__
 from nova.agent_loop import BaseHandler, StepOutcome, agent_runner_loop
+from nova.events import EventBus
 from nova.llmcore import LLMClient, create_client_from_config
 from nova.tools.handler import NovaHandler, smart_format, get_global_memory
 from nova.memory.engine import TwoTierMemory
 from nova.context.system_prompt import build_system_prompt
 from nova.cron import NovaCron
 from nova.autonomous import AutonomousMonitor
+
+logger = logging.getLogger("nova")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 HOME_DIR = os.path.expanduser('~')
@@ -57,10 +61,11 @@ class NovaAgent:
         os.makedirs(self.task_dir, exist_ok=True)
         self.history = []
         self.task_queue = queue.Queue()
-        self._busy = threading.Event()  # Thread-safe: set when running, clear when done
+        self._busy = threading.Event()
         self.stop_sig = False
         self.handler = None
         self.verbose = True
+        self.events = EventBus()
         self.cron = NovaCron(self)
         self.autonomous = AutonomousMonitor(self)
 
@@ -72,7 +77,8 @@ class NovaAgent:
     def abort(self):
         if not self._busy.is_set():
             return
-        print('Aborting current task...')
+        logger.info('Aborting current task...')
+        self.events.emit("status", "Aborting current task...")
         self.stop_sig = True
         if self.handler:
             self.handler.code_stop_signal.append(1)
@@ -175,7 +181,20 @@ class NovaAgent:
                 self.task_queue.task_done()
 
     def run_interactive(self):
-        """Interactive CLI mode."""
+        """Interactive CLI mode — TUI by default, raw REPL via NOVA_CLI=1."""
+        if os.environ.get('NOVA_CLI'):
+            self._run_raw_repl()
+            return
+        try:
+            from nova.tui.app import NovaApp
+            app = NovaApp(self)
+            app.run()
+        except Exception as e:
+            logger.warning(f"TUI failed: {e}. Falling back to raw REPL.")
+            self._run_raw_repl()
+
+    def _run_raw_repl(self):
+        """Raw REPL fallback for terminals that can't run Textual."""
         self.verbose = True
         threading.Thread(target=self.run, daemon=True).start()
         self.cron.start()

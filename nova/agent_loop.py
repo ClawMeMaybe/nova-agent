@@ -8,8 +8,13 @@ Without it, the LLM loses context after each tool result.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
+
+from nova.events import AgentEvent
+
+logger = logging.getLogger("nova")
 
 
 @dataclass
@@ -22,6 +27,8 @@ class StepOutcome:
 
 class BaseHandler:
     """Base class for tool handlers. Subclass and add do_<tool_name> methods."""
+
+    events = None  # EventBus instance, set by parent agent
 
     def tool_before_callback(self, tool_name, args, response):
         pass
@@ -71,7 +78,9 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
 
     while turn < max_turns:
         turn += 1
-        print(f"\n** Turn {turn} **")
+        logger.debug(f"Turn {turn}")
+        if handler.events:
+            handler.events.emit(AgentEvent.AGENT_THINKING, {"turn": turn})
 
         # Call LLM with full history
         response = client.chat(messages=messages, tools=tools_schema)
@@ -109,9 +118,13 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             tool_name, args, tid = tc['tool_name'], tc['args'], tc.get('id', '')
 
             if tool_name == 'no_tool':
-                pass
+                # Emit direct text response for TUI
+                if handler.events and response.content:
+                    handler.events.emit(AgentEvent.AGENT_RESPONSE, response.content)
             else:
-                print(f"  Tool: {tool_name} args: {_compact_args(args)}")
+                logger.debug(f"Tool: {tool_name}")
+                if handler.events:
+                    handler.events.emit(AgentEvent.TOOL_CALL, {"name": tool_name, "summary": _compact_args(args)})
 
             outcome = handler.dispatch(tool_name, args, response, index=ii)
 
@@ -125,6 +138,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             if outcome.data is not None and tool_name != 'no_tool':
                 datastr = json.dumps(outcome.data, ensure_ascii=False) if isinstance(outcome.data, (dict, list)) else str(outcome.data)
                 tool_results.append({'tool_use_id': tid, 'content': datastr})
+                # Emit tool result event for TUI
+                if handler.events:
+                    result_summary = str(outcome.data)[:80] if outcome.data else ""
+                    handler.events.emit(AgentEvent.TOOL_RESULT, {"name": tool_name, "summary": result_summary, "status": "success" if isinstance(outcome.data, dict) and outcome.data.get("status") == "success" else "done"})
 
             next_prompts.add(outcome.next_prompt)
 
@@ -176,6 +193,15 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
 
     if exit_reason:
         handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
+        # Emit completion events for TUI
+        if handler.events:
+            response_text = getattr(response, 'content', '') or ''
+            if response_text:
+                handler.events.emit(AgentEvent.AGENT_RESPONSE, response_text)
+            handler.events.emit(AgentEvent.AGENT_DONE, {"result": exit_reason.get('result', 'UNKNOWN')})
+    elif not exit_reason:
+        if handler.events:
+            handler.events.emit(AgentEvent.AGENT_DONE, {"result": "MAX_TURNS_EXCEEDED"})
 
     return exit_reason or {'result': 'MAX_TURNS_EXCEEDED'}
 
