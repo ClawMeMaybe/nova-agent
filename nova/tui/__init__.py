@@ -1,4 +1,4 @@
-"""Nova TUI — Textual terminal UI for Nova Agent."""
+"""Nova TUI — Rich + prompt_toolkit inline REPL for Nova Agent."""
 
 from nova.tui.app import NovaApp
 

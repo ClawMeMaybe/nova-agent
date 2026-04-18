@@ -1,94 +1,135 @@
-"""NovaApp — Textual TUI application for Nova Agent."""
+"""NovaApp — Rich + prompt_toolkit inline REPL for Nova Agent.
 
+No alternate screen buffer, no full-screen takeover.
+Content prints inline, just like aider/claude-code/opencode.
+"""
+
+import json
 import logging
 import threading
 
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.widgets import RichLog
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.text import Text
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.history import InMemoryHistory
 
-from nova.events import AgentEvent
-from nova.tui.screens.chat import ChatScreen
-from nova.tui.styles.theme import get_theme_css
-from nova.tui.widgets.dialog import AskUserDialog
+from nova import __version__
+from nova.events import AgentEvent, EventBus
+from nova.tui.styles.theme import get_color
 
 logger = logging.getLogger("nova")
 
+COMMANDS = {
+    "/quit": "Exit Nova Agent",
+    "/stats": "Show memory statistics",
+    "/wiki": "List wiki pages",
+    "/cron": "List cron jobs",
+    "/todo": "Show autonomous TODO",
+    "/evolve": "Show evolution score",
+    "/help": "Show available commands",
+}
 
-class NovaApp(App):
-    """Nova Agent TUI — adapts to your terminal theme."""
 
-    TITLE = "Nova Agent"
-    SUB_TITLE = "Self-evolving AI assistant"
-
-    CSS = """
-    Screen {
-        background: $background;
-    }
-    """
-
-    BINDINGS = [
-        Binding("ctrl+q", "quit", "Quit", show=True),
-        Binding("ctrl+c", "abort", "Abort", show=True),
-    ]
+class NovaApp:
+    """Rich + prompt_toolkit inline REPL — works in any terminal."""
 
     def __init__(self, agent):
-        super().__init__()
         self.agent = agent
-        self._poll_handle = None
+        self.console = Console()
+        self._running = True
+        self._event_buffer = []
+        self._event_lock = threading.Lock()
 
-    def compose(self) -> ComposeResult:
-        yield ChatScreen()
-
-    def on_mount(self) -> None:
-        # Write a visible test message FIRST to verify rendering works
-        chat = self.query_one("#chat-panel", RichLog)
-        chat.write("Nova Agent starting...")
-
-        # Start agent background thread
+    def run(self):
+        """Main REPL loop."""
+        # Start background threads
         threading.Thread(target=self.agent.run, daemon=True).start()
         self.agent.cron.start()
         self.agent.autonomous.start()
 
-        # Start event polling (100ms interval)
-        self._poll_handle = self.set_interval(0.1, self._poll_events)
+        # Register event listener
+        self.agent.events.add_listener(self._on_event)
 
-        # Show startup message
-        from nova import __version__
+        # Show startup banner
+        self._show_banner()
+
+        # REPL loop with prompt_toolkit
+        completer = WordCompleter(list(COMMANDS.keys()))
+        session = PromptSession(
+            history=InMemoryHistory(),
+            completer=completer,
+            multiline=False,
+        )
+
+        while self._running:
+            try:
+                text = session.prompt("nova> ")
+            except KeyboardInterrupt:
+                # Ctrl+C — abort current task
+                if self.agent.is_running:
+                    self.agent.abort()
+                    self.console.print("[grey50]Aborting current task...[/]")
+                continue
+            except EOFError:
+                # Ctrl+D — exit
+                break
+
+            text = text.strip()
+            if not text:
+                # Flush buffered events when idle
+                self._flush_events()
+                continue
+
+            if text.startswith("/"):
+                self._handle_command(text)
+            else:
+                self._send_message(text)
+
+        self.console.print("[grey50]Goodbye![/]")
+
+    def _show_banner(self):
+        """Show startup banner with Rich formatting."""
         stats = self.agent.memory.stats()
-        startup_msg = f"""**Nova Agent v{__version__}** — Self-evolving AI assistant
+        model_name = getattr(self.agent.client.backend, 'name', 'unknown')
 
+        banner = Markdown(f"""**Nova Agent v{__version__}** — Self-evolving AI assistant
+
+- Model: {model_name}
 - Local: {stats['local_wiki_pages']} wiki | {stats['local_facts']} facts | {stats['local_skills']} skills
 - Global: {stats['global_wiki_pages']} wiki | {stats['global_facts']} facts | {stats['global_skills']} skills
 
-Type your message, or `/help` for commands."""
-        chat.add_agent_response(startup_msg)
+Type your message, or `/help` for commands.""")
+        self.console.print(banner)
+        self.console.print()
 
-    def _poll_events(self) -> None:
-        """Process all queued events from the agent."""
-        events_bus = self.agent.events
-        events = events_bus.poll()
-        if not events:
-            return
+    def _on_event(self, event_type, data=None):
+        """EventBus listener — buffer events, flush when input is idle."""
+        with self._event_lock:
+            self._event_buffer.append((event_type, data))
 
-        chat = self.query_one("#chat-panel")
-        status = self.query_one("#status-bar")
+    def _flush_events(self):
+        """Render all buffered events inline."""
+        with self._event_lock:
+            events = self._event_buffer[:]
+            self._event_buffer.clear()
 
-        for event in events:
-            etype = event["type"]
-            data = event["data"]
+        for event_type, data in events:
+            self._render_event(event_type, data)
 
-            if etype == AgentEvent.AGENT_THINKING:
-                status.set_thinking()
+    def _render_event(self, event_type, data):
+        """Render a single event using Rich."""
+        if event_type == AgentEvent.AGENT_RESPONSE:
+            if data and isinstance(data, str) and data.strip():
+                self.console.print(Markdown(data))
 
-            elif etype == AgentEvent.TOOL_CALL:
+        elif event_type == AgentEvent.TOOL_CALL:
+            if isinstance(data, dict):
                 name = data.get("name", "?")
                 summary = data.get("summary", "")
-                if name == "code_run":
-                    pass
-                elif summary.startswith("{"):
+                if summary.startswith("{"):
                     try:
-                        import json
                         args_dict = json.loads(summary.rstrip("..."))
                         if "path" in args_dict:
                             summary = args_dict["path"]
@@ -102,42 +143,176 @@ Type your message, or `/help` for commands."""
                             summary = ""
                     except Exception:
                         summary = ""
-                chat.add_tool_indicator(name, summary, "running")
-                status.add_tool(name, summary)
+                tool_color = get_color("tool-name")
+                self.console.print(
+                    f"  [{tool_color}]{name}[/] {summary[:60]}",
+                    highlight=False
+                )
 
-            elif etype == AgentEvent.TOOL_RESULT:
+        elif event_type == AgentEvent.TOOL_RESULT:
+            if isinstance(data, dict):
                 name = data.get("name", "?")
                 summary = data.get("summary", "")
                 status_val = data.get("status", "done")
-                chat.add_tool_indicator(name, summary, status_val)
+                tool_color = get_color("tool-name")
+                success_color = get_color("success")
+                error_color = get_color("error")
+                warning_color = get_color("warning")
+                if status_val == "success":
+                    icon = f"[bold {success_color}]✓[/]"
+                elif status_val == "done":
+                    icon = f"[bold {warning_color}]●[/]"
+                else:
+                    icon = f"[bold {error_color}]✗[/]"
+                self.console.print(
+                    f"  [{tool_color}]{name}[/] {summary[:60]} {icon}",
+                    highlight=False
+                )
 
-            elif etype == AgentEvent.AGENT_RESPONSE:
-                if data and isinstance(data, str) and data.strip():
-                    chat.add_agent_response(data)
+        elif event_type == AgentEvent.AGENT_THINKING:
+            muted = get_color("text-muted")
+            self.console.print(f"[{muted}]Thinking...[/]", highlight=False)
 
-            elif etype == AgentEvent.AGENT_DONE:
-                status.set_done()
+        elif event_type == AgentEvent.AGENT_DONE:
+            muted = get_color("text-muted")
+            tool_count = 0
+            if isinstance(data, dict):
+                tool_count = data.get("tool_count", 0)
+            if tool_count > 0:
+                self.console.print(f"[{muted}]{tool_count} tools completed[/]", highlight=False)
 
-            elif etype == AgentEvent.ERROR:
-                chat.add_error(str(data) if data else "Unknown error")
-                status.set_done()
+        elif event_type == AgentEvent.ERROR:
+            error_color = get_color("error")
+            self.console.print(f"[bold {error_color}]Error:[/] {data}", highlight=False)
 
-            elif etype == AgentEvent.ASK_USER:
-                question = data.get("question", "Please provide input:")
-                candidates = data.get("candidates", [])
-                handler = self.agent.handler
-                self.push_screen(AskUserDialog(question, candidates, handler=handler))
+        elif event_type == AgentEvent.STATUS:
+            muted = get_color("text-muted")
+            self.console.print(f"[{muted}]{data}[/]", highlight=False)
 
-            elif etype == AgentEvent.STATUS:
-                chat.add_status(str(data) if data else "")
+        elif event_type == AgentEvent.ASK_USER:
+            self._handle_ask_user(data)
 
-    def action_abort(self) -> None:
-        """Abort current agent task."""
-        self.agent.abort()
-        chat = self.query_one("#chat-panel")
-        chat.add_status("Aborting current task...")
+    def _handle_ask_user(self, data):
+        """Handle ask_user event with prompt_toolkit."""
+        if not isinstance(data, dict):
+            return
+        question = data.get("question", "Please provide input:")
+        candidates = data.get("candidates", [])
 
-    def on_unmount(self) -> None:
-        """Cleanup on exit."""
-        if self._poll_handle:
-            self._poll_handle.stop()
+        self.console.print(f"\n[bold]{question}[/]")
+
+        if candidates:
+            for i, c in enumerate(candidates):
+                self.console.print(f"  {i+1}. {c}")
+            try:
+                answer = PromptSession().prompt("Your answer: ")
+                # Try to match numeric input to candidate
+                try:
+                    idx = int(answer) - 1
+                    if 0 <= idx < len(candidates):
+                        answer = candidates[idx]
+                except ValueError:
+                    pass
+            except (EOFError, KeyboardInterrupt):
+                answer = "__timeout__"
+        else:
+            try:
+                answer = PromptSession().prompt("Your answer: ")
+            except (EOFError, KeyboardInterrupt):
+                answer = "__timeout__"
+
+        handler = self.agent.handler
+        if handler and hasattr(handler, '_ask_response_queue'):
+            handler._ask_response_queue.put(answer)
+
+    def _handle_command(self, cmd):
+        """Handle /commands."""
+        if cmd == "/quit":
+            self._running = False
+            return
+
+        if cmd == "/help":
+            lines = Text()
+            lines.append("Available commands:\n", style="bold")
+            for k, v in COMMANDS.items():
+                lines.append(f"  {k} ", style="cyan")
+                lines.append(f"— {v}\n")
+            self.console.print(lines)
+            return
+
+        if cmd == "/stats":
+            stats = self.agent.memory.stats()
+            self.console.print(f"[bold]Local:[/] Wiki: {stats['local_wiki_pages']} | Facts: {stats['local_facts']} | Skills: {stats['local_skills']} | Sessions: {stats['local_sessions']} | Trust: {stats['local_avg_trust']:.2f}")
+            self.console.print(f"[bold]Global:[/] Wiki: {stats['global_wiki_pages']} | Facts: {stats['global_facts']} | Skills: {stats['global_skills']} | Sessions: {stats['global_sessions']} | Trust: {stats['global_avg_trust']:.2f}")
+            return
+
+        if cmd == "/wiki":
+            pages = self.agent.memory.wiki_list()
+            if not pages:
+                self.console.print("[grey50]No wiki pages.[/]")
+            for p in pages:
+                tier = p.get('_tier', '?')
+                self.console.print(f"  [{tier}] [{p['category']}] {p['title']} (tags: {p['tags']})")
+            return
+
+        if cmd == "/cron":
+            from nova.cron.jobs import list_jobs
+            jobs = list_jobs()
+            if not jobs:
+                self.console.print("[grey50]No cron jobs configured.[/]")
+            else:
+                for j in jobs:
+                    status = "enabled" if j.get('enabled', True) else "disabled"
+                    self.console.print(f"  {j['id']}: {j['name']} ({j['schedule']['kind']}) next={j['next_run_at']} runs={j['completed_count']} {status}")
+            return
+
+        if cmd == "/todo":
+            todo = self.agent.memory.wiki_read('autonomous-todo', tier='global')
+            if todo and todo.get('content'):
+                self.console.print(Markdown(todo['content']))
+            else:
+                self.console.print("[grey50]No autonomous TODO yet. Agent will create one during idle self-improvement.[/]")
+            return
+
+        if cmd == "/evolve":
+            score, trend = self.agent.memory.evolution_score()
+            trend_arrow = '↑' if trend > 0 else '↓' if trend < 0 else '—'
+            self.console.print(f"[bold]Evolution Score:[/] {score:.2f} (trend: {trend_arrow})")
+            try:
+                recent = self.agent.memory._local._conn.execute(
+                    "SELECT loss_task, loss_efficiency, loss_recurrence, loss_knowledge_quality, "
+                    "loss_total, evolution_score, created_at "
+                    "FROM evolution_log ORDER BY created_at DESC LIMIT 5"
+                ).fetchall()
+                if recent:
+                    for r in recent:
+                        self.console.print(
+                            f"  [{r['created_at'][:10]}] L_task={r['loss_task']:.1f} "
+                            f"L_eff={r['loss_efficiency']:.2f} L_rec={r['loss_recurrence']:.2f} "
+                            f"L_kq={r['loss_knowledge_quality']:.2f} L_total={r['loss_total']:.2f} "
+                            f"score={r['evolution_score']:.2f}"
+                        )
+            except Exception:
+                pass
+            return
+
+        # Unknown /command — treat as task input
+        user_color = get_color("user-msg")
+        self.console.print(f"[bold {user_color}]You:[/] {cmd}")
+        self.agent.put_task(cmd, source="user")
+
+    def _send_message(self, text):
+        """Send user message to agent and flush events as they arrive."""
+        user_color = get_color("user-msg")
+        self.console.print(f"[bold {user_color}]You:[/] {text}")
+
+        # Submit task — we'll pick up events via the listener
+        self.agent.put_task(text, source="user")
+
+        # Wait for agent to finish, flushing events periodically
+        while self.agent.is_running:
+            self._flush_events()
+            threading.Event().wait(0.1)
+
+        # Final flush
+        self._flush_events()

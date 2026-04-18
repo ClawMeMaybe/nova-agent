@@ -181,17 +181,10 @@ class NovaAgent:
                 self.task_queue.task_done()
 
     def run_interactive(self):
-        """Interactive CLI mode — TUI by default, raw REPL via NOVA_CLI=1."""
-        if os.environ.get('NOVA_CLI'):
-            self._run_raw_repl()
-            return
-        try:
-            from nova.tui.app import NovaApp
-            app = NovaApp(self)
-            app.run()
-        except Exception as e:
-            logger.warning(f"TUI failed: {e}. Falling back to raw REPL.")
-            self._run_raw_repl()
+        """Interactive CLI mode — Rich + prompt_toolkit REPL."""
+        from nova.tui.app import NovaApp
+        app = NovaApp(self)
+        app.run()
 
     def _run_raw_repl(self):
         """Raw REPL fallback for terminals that can't run Textual."""
