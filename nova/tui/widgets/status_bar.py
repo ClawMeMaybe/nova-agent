@@ -1,8 +1,12 @@
 """StatusBar — bottom bar with model name, spinner, and tool indicators."""
 
+import logging
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static, LoadingIndicator
+
+logger = logging.getLogger("nova")
 
 
 class StatusBar(Horizontal):
@@ -37,13 +41,25 @@ class StatusBar(Horizontal):
         yield Static(id="tool-status")
 
     def on_mount(self) -> None:
-        self._set_model()
-        self._set_idle()
+        try:
+            self._set_model()
+            self._set_idle()
+        except Exception as e:
+            logger.error(f"StatusBar on_mount error: {e}")
+            try:
+                self.query_one("#model-label", Static).update(" nova")
+                self.query_one("#spinner-area", LoadingIndicator).display = False
+                self.query_one("#tool-status", Static).update("")
+            except Exception:
+                pass
 
     def _set_model(self) -> None:
-        agent = self.app.agent
-        model_name = getattr(agent.client.backend, 'name', 'unknown')
-        self.query_one("#model-label", Static).update(f" {model_name}")
+        try:
+            agent = self.app.agent
+            model_name = getattr(agent.client.backend, 'name', 'unknown')
+            self.query_one("#model-label", Static).update(f" {model_name}")
+        except Exception:
+            self.query_one("#model-label", Static).update(" nova")
 
     def _set_idle(self) -> None:
         self.query_one("#spinner-area", LoadingIndicator).display = False

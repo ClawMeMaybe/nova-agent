@@ -16,8 +16,15 @@ class ChatPanel(RichLog):
         border: none;
         scrollbar-size: 1 1;
         padding: 1 2;
+        min-width: 0;
     }
     """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("markup", True)
+        kwargs.setdefault("wrap", True)
+        kwargs.setdefault("auto_scroll", True)
+        super().__init__(**kwargs)
 
     def add_user_message(self, text: str) -> None:
         user_color = get_color("user-msg")

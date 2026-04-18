@@ -20,10 +20,7 @@ class NovaApp(App):
     TITLE = "Nova Agent"
     SUB_TITLE = "Self-evolving AI assistant"
 
-    # In auto mode, only custom aliases are defined; Textual's built-in
-    # tokens ($background, $text, $surface, etc.) auto-adapt to terminal.
-    # In override mode, all tokens are replaced with hex colors.
-    CSS = get_theme_css() + """
+    CSS = """
     Screen {
         background: $background;
     }
@@ -43,98 +40,113 @@ class NovaApp(App):
         yield ChatScreen()
 
     def on_mount(self) -> None:
-        # Start agent background thread
-        threading.Thread(target=self.agent.run, daemon=True).start()
-        self.agent.cron.start()
-        self.agent.autonomous.start()
+        try:
+            # Start agent background thread
+            threading.Thread(target=self.agent.run, daemon=True).start()
+            self.agent.cron.start()
+            self.agent.autonomous.start()
 
-        # Start event polling (100ms interval)
-        self._poll_handle = self.set_interval(0.1, self._poll_events)
+            # Start event polling (100ms interval)
+            self._poll_handle = self.set_interval(0.1, self._poll_events)
 
-        # Show startup message in chat
-        chat = self.query_one("#chat-panel")
-        from nova import __version__
-        stats = self.agent.memory.stats()
-        startup_msg = f"""**Nova Agent v{__version__}** — Self-evolving AI assistant
+            # Show startup message in chat
+            chat = self.query_one("#chat-panel")
+            from nova import __version__
+            stats = self.agent.memory.stats()
+            startup_msg = f"""**Nova Agent v{__version__}** — Self-evolving AI assistant
 
 - Local: {stats['local_wiki_pages']} wiki | {stats['local_facts']} facts | {stats['local_skills']} skills
 - Global: {stats['global_wiki_pages']} wiki | {stats['global_facts']} facts | {stats['global_skills']} skills
 
 Type your message, or `/help` for commands."""
-        chat.add_agent_response(startup_msg)
+            chat.add_agent_response(startup_msg)
+        except Exception as e:
+            logger.error(f"on_mount error: {e}")
+            # Try to show error in chat if possible
+            try:
+                chat = self.query_one("#chat-panel")
+                chat.add_error(f"Startup error: {e}")
+            except Exception:
+                pass
 
     def _poll_events(self) -> None:
         """Process all queued events from the agent."""
-        events_bus = self.agent.events
-        events = events_bus.poll()
-        if not events:
-            return
+        try:
+            events_bus = self.agent.events
+            events = events_bus.poll()
+            if not events:
+                return
 
-        chat = self.query_one("#chat-panel")
-        status = self.query_one("#status-bar")
+            chat = self.query_one("#chat-panel")
+            status = self.query_one("#status-bar")
 
-        for event in events:
-            etype = event["type"]
-            data = event["data"]
+            for event in events:
+                etype = event["type"]
+                data = event["data"]
 
-            if etype == AgentEvent.AGENT_THINKING:
-                status.set_thinking()
+                if etype == AgentEvent.AGENT_THINKING:
+                    status.set_thinking()
 
-            elif etype == AgentEvent.TOOL_CALL:
-                name = data.get("name", "?")
-                summary = data.get("summary", "")
-                if name == "code_run":
-                    pass
-                elif summary.startswith("{"):
-                    try:
-                        import json
-                        args_dict = json.loads(summary.rstrip("..."))
-                        if "path" in args_dict:
-                            summary = args_dict["path"]
-                        elif "query" in args_dict:
-                            summary = args_dict["query"][:40]
-                        elif "code" in args_dict:
-                            summary = args_dict["code"][:40]
-                        elif "sql" in args_dict:
-                            summary = args_dict["sql"][:40]
-                        else:
+                elif etype == AgentEvent.TOOL_CALL:
+                    name = data.get("name", "?")
+                    summary = data.get("summary", "")
+                    if name == "code_run":
+                        pass
+                    elif summary.startswith("{"):
+                        try:
+                            import json
+                            args_dict = json.loads(summary.rstrip("..."))
+                            if "path" in args_dict:
+                                summary = args_dict["path"]
+                            elif "query" in args_dict:
+                                summary = args_dict["query"][:40]
+                            elif "code" in args_dict:
+                                summary = args_dict["code"][:40]
+                            elif "sql" in args_dict:
+                                summary = args_dict["sql"][:40]
+                            else:
+                                summary = ""
+                        except Exception:
                             summary = ""
-                    except Exception:
-                        summary = ""
-                chat.add_tool_indicator(name, summary, "running")
-                status.add_tool(name, summary)
+                    chat.add_tool_indicator(name, summary, "running")
+                    status.add_tool(name, summary)
 
-            elif etype == AgentEvent.TOOL_RESULT:
-                name = data.get("name", "?")
-                summary = data.get("summary", "")
-                status_val = data.get("status", "done")
-                chat.add_tool_indicator(name, summary, status_val)
+                elif etype == AgentEvent.TOOL_RESULT:
+                    name = data.get("name", "?")
+                    summary = data.get("summary", "")
+                    status_val = data.get("status", "done")
+                    chat.add_tool_indicator(name, summary, status_val)
 
-            elif etype == AgentEvent.AGENT_RESPONSE:
-                if data and isinstance(data, str) and data.strip():
-                    chat.add_agent_response(data)
+                elif etype == AgentEvent.AGENT_RESPONSE:
+                    if data and isinstance(data, str) and data.strip():
+                        chat.add_agent_response(data)
 
-            elif etype == AgentEvent.AGENT_DONE:
-                status.set_done()
+                elif etype == AgentEvent.AGENT_DONE:
+                    status.set_done()
 
-            elif etype == AgentEvent.ERROR:
-                chat.add_error(str(data) if data else "Unknown error")
-                status.set_done()
+                elif etype == AgentEvent.ERROR:
+                    chat.add_error(str(data) if data else "Unknown error")
+                    status.set_done()
 
-            elif etype == AgentEvent.ASK_USER:
-                question = data.get("question", "Please provide input:")
-                candidates = data.get("candidates", [])
-                handler = self.agent.handler
-                self.push_screen(AskUserDialog(question, candidates, handler=handler))
+                elif etype == AgentEvent.ASK_USER:
+                    question = data.get("question", "Please provide input:")
+                    candidates = data.get("candidates", [])
+                    handler = self.agent.handler
+                    self.push_screen(AskUserDialog(question, candidates, handler=handler))
 
-            elif etype == AgentEvent.STATUS:
-                chat.add_status(str(data) if data else "")
+                elif etype == AgentEvent.STATUS:
+                    chat.add_status(str(data) if data else "")
+        except Exception as e:
+            logger.error(f"poll_events error: {e}")
 
     def action_abort(self) -> None:
         """Abort current agent task."""
         self.agent.abort()
-        chat = self.query_one("#chat-panel")
-        chat.add_status("Aborting current task...")
+        try:
+            chat = self.query_one("#chat-panel")
+            chat.add_status("Aborting current task...")
+        except Exception:
+            pass
 
     def on_unmount(self) -> None:
         """Cleanup on exit."""
