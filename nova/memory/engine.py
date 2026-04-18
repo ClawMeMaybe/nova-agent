@@ -225,12 +225,13 @@ CREATE TABLE IF NOT EXISTS evolution_log (
     gradient_facts TEXT NOT NULL DEFAULT '[]',
     gradient_skills TEXT NOT NULL DEFAULT '[]',
     improvement_targets TEXT NOT NULL DEFAULT '[]',
+    hindsight_hint TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evolution_log_score ON evolution_log(evolution_score DESC);
 
 -- Update schema version
-UPDATE _meta SET value = '4' WHERE key = 'schema_version';
+UPDATE _meta SET value = '5' WHERE key = 'schema_version';
 """
 
 SCHEMA_SQL = SCHEMA_V1
@@ -386,6 +387,22 @@ class NovaMemory:
                     self._conn.commit()
             except Exception as e:
                 print(f"[Migration] V4 migration error: {e}")
+
+        if current_version < 5:
+            # V5: Add hindsight_hint column to evolution_log
+            try:
+                cols = [r[1] for r in self._conn.execute(
+                    "PRAGMA table_info(evolution_log)"
+                ).fetchall()]
+                if 'hindsight_hint' not in cols:
+                    self._conn.execute(
+                        "ALTER TABLE evolution_log ADD COLUMN hindsight_hint TEXT NOT NULL DEFAULT ''"
+                    )
+                    self._conn.commit()
+                self._conn.execute("UPDATE _meta SET value='5' WHERE key='schema_version'")
+                self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V5 migration error: {e}")
 
     def _seed_defaults(self):
         if self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE slug='meta-rules'").fetchone()[0] == 0:
@@ -628,6 +645,18 @@ class NovaMemory:
         count = self._conn.execute("DELETE FROM wiki_pages WHERE slug=?", (slug,)).rowcount
         self._conn.commit()
         return count > 0
+
+    @_write_locked
+    def wiki_mark_quality(self, slug: str, quality: str) -> bool:
+        """Update wiki page confidence based on RL feedback.
+        quality: 'high' (proven helpful), 'medium' (neutral), 'low' (unhelpful/outdated)
+        """
+        rows = self._conn.execute(
+            "UPDATE wiki_pages SET confidence=?, updated_at=? WHERE slug=?",
+            (quality, datetime.now().isoformat(), slug)
+        ).rowcount
+        self._conn.commit()
+        return rows > 0
 
     def wiki_lint(self) -> List[str]:
         issues = []
@@ -999,7 +1028,8 @@ class NovaMemory:
     def compute_evolution_loss(self, session_id: int, turns_used: int,
                                max_turns: int, task_success: bool,
                                accessed_fact_ids: List[int],
-                               accessed_skill_names: List[str]) -> Dict:
+                               accessed_skill_names: List[str],
+                               hindsight_hint: str = '') -> Dict:
         """Compute per-session evolution loss and gradient direction.
 
         The loss measures how effectively knowledge served task completion.
@@ -1079,6 +1109,7 @@ class NovaMemory:
             'gradient_facts': gradient_facts,
             'gradient_skills': gradient_skills,
             'improvement_targets': improvement_targets,
+            'hindsight_hint': hindsight_hint,
         }
 
     @_write_locked
@@ -1088,13 +1119,14 @@ class NovaMemory:
         cur = self._conn.execute(
             "INSERT INTO evolution_log (session_id,loss_task,loss_efficiency,loss_recurrence,"
             "loss_knowledge_quality,loss_total,evolution_score,gradient_facts,gradient_skills,"
-            "improvement_targets,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "improvement_targets,hindsight_hint,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (session_id, loss_data['loss_task'], loss_data['loss_efficiency'],
              loss_data['loss_recurrence'], loss_data['loss_knowledge_quality'],
              loss_data['loss_total'], loss_data['evolution_score'],
              json.dumps(loss_data['gradient_facts'], ensure_ascii=False),
              json.dumps(loss_data['gradient_skills'], ensure_ascii=False),
-             json.dumps(loss_data['improvement_targets'], ensure_ascii=False), now)
+             json.dumps(loss_data['improvement_targets'], ensure_ascii=False),
+             loss_data['hindsight_hint'], now)
         )
         self._conn.commit()
         return cur.lastrowid
@@ -1181,7 +1213,8 @@ class NovaMemory:
         slug = self._make_slug(f"session-{session['task'][:30]}-{session['created_at'][:10]}")
 
         page_id = self.wiki_add(slug, title, content, category='session-log',
-                                tags='session,archive', confidence='low')
+                                tags='session,archive',
+                                confidence='high' if self.evolution_score()[0] > 0.7 else 'medium' if self.evolution_score()[0] > 0.4 else 'low')
         self._conn.execute("UPDATE sessions SET wiki_page_id=? WHERE id=?", (page_id, session_id))
         self._conn.commit()
         return page_id
@@ -1321,6 +1354,20 @@ class NovaMemory:
                 prompt += f"  [local] {f['content']}\n"
             for f in global_top3:
                 prompt += f"  [global] {f['content']}\n"
+
+        # Evolution status — RL direction for next session
+        ev_score, ev_trend = self.evolution_score()
+        if ev_score != 0.5:  # Only show if we have data
+            trend_arrow = '↑' if ev_trend > 0 else '↓' if ev_trend < 0 else '—'
+            prompt += f"\n[Evolution Status] score={ev_score:.2f} trend={trend_arrow}\n"
+            if ev_trend < 0:
+                targets_row = self._conn.execute(
+                    "SELECT improvement_targets FROM evolution_log ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+                if targets_row:
+                    tgt_list = json.loads(targets_row[0])
+                    if tgt_list:
+                        prompt += f"  Priority targets: {', '.join(tgt_list)}\n"
 
         # Retrieval hints — tell the agent HOW to get what it needs
         prompt += "\n[Retrieval]\n"
@@ -1594,6 +1641,11 @@ class TwoTierMemory:
         target = self._target(tier)
         return target.wiki_delete(slug)
 
+    def wiki_mark_quality(self, slug: str, quality: str, tier: str = 'local') -> bool:
+        """Update wiki page confidence based on RL feedback."""
+        target = self._target(tier)
+        return target.wiki_mark_quality(slug, quality)
+
     def wiki_lint(self) -> List[str]:
         issues = self._local.wiki_lint()
         issues.extend(self._global.wiki_lint())
@@ -1745,10 +1797,11 @@ class TwoTierMemory:
     def compute_evolution_loss(self, session_id: int, turns_used: int,
                                max_turns: int, task_success: bool,
                                accessed_fact_ids: list = None,
-                               accessed_skill_names: list = None) -> Dict:
+                               accessed_skill_names: list = None,
+                               hindsight_hint: str = '') -> Dict:
         return self._local.compute_evolution_loss(session_id, turns_used, max_turns,
                                                    task_success, accessed_fact_ids,
-                                                   accessed_skill_names)
+                                                   accessed_skill_names, hindsight_hint)
 
     def evolution_log_add(self, session_id: int, loss_data: Dict) -> int:
         return self._local.evolution_log_add(session_id, loss_data)
@@ -1825,6 +1878,20 @@ class TwoTierMemory:
                 prompt += f"  [local] {f['content']}\n"
             for f in global_top:
                 prompt += f"  [global] {f['content']}\n"
+
+        # Evolution status — RL direction for next session
+        ev_score, ev_trend = self._local.evolution_score()
+        if ev_score != 0.5:  # Only show if we have data
+            trend_arrow = '↑' if ev_trend > 0 else '↓' if ev_trend < 0 else '—'
+            prompt += f"\n[Evolution Status] score={ev_score:.2f} trend={trend_arrow}\n"
+            if ev_trend < 0:
+                targets_row = self._local._conn.execute(
+                    "SELECT improvement_targets FROM evolution_log ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+                if targets_row:
+                    tgt_list = json.loads(targets_row[0])
+                    if tgt_list:
+                        prompt += f"  Priority targets: {', '.join(tgt_list)}\n"
 
         # Retrieval hints
         prompt += "\n[Retrieval]\n"

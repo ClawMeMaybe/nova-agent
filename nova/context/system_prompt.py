@@ -28,7 +28,7 @@ You have a two-tier SQLite knowledge base that persists across sessions:
 
 Tables: wiki_pages (rich knowledge pages), facts (atomic verified facts with trust scores), skills (SOPs with success rates), sessions (task archives), evolution_log (loss function tracking self-evolution).
 
-Evolution score measures overall performance trend: 1 - avg(loss) over recent sessions. Check /evolve for details. When declining, autonomous mode prioritizes skills flagged by the gradient.
+Evolution score measures overall performance trend: 1 - avg(loss) over recent sessions. Check /evolve for details. Gradient feedback is proportional to loss magnitude — big failures drive big updates. When declining, autonomous mode prioritizes skills flagged by the gradient and uses hindsight hints from recent failures to add pitfalls.
 
 ### How to Remember Knowledge
 Use whichever tool fits the moment:

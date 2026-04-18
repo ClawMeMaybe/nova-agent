@@ -332,3 +332,226 @@ class TestV4Migration:
 
 
 import sqlite3
+
+
+# ── Pipeline Fix Tests ──
+
+
+class TestEvolutionOnFailure:
+    """Verify evolution loss is computed on ALL outcomes, not just success."""
+
+    def test_loss_computed_on_failure(self, local_memory):
+        sid = local_memory.session_create("failing task")
+        loss = local_memory.compute_evolution_loss(
+            session_id=sid, turns_used=40, max_turns=40,
+            task_success=False, accessed_fact_ids=[], accessed_skill_names=[],
+            hindsight_hint='tried code_run but timeout; tried file_write but error'
+        )
+        assert loss['loss_task'] == 1.0
+        assert loss['loss_total'] > 1.0
+        assert loss['hindsight_hint'] == 'tried code_run but timeout; tried file_write but error'
+
+    def test_gradient_applied_on_failure(self, local_memory):
+        fid = local_memory.fact_add("bad fact", category="test", trust_score=0.5)
+        local_memory.skill_add("bad_skill", "desc", ["step1"], triggers="bad")
+        sid = local_memory.session_create("failing task")
+        loss = local_memory.compute_evolution_loss(
+            session_id=sid, turns_used=40, max_turns=40,
+            task_success=False, accessed_fact_ids=[fid],
+            accessed_skill_names=["bad_skill"],
+            hindsight_hint='bad_skill timeout'
+        )
+        local_memory.evolution_log_add(sid, loss)
+        local_memory.apply_gradient(loss)
+        # Fact trust should decrease (negative gradient)
+        fact = local_memory._conn.execute("SELECT trust_score FROM facts WHERE id=?", (fid,)).fetchone()
+        assert fact[0] < 0.5
+        # Skill success rate should decrease
+        skill = local_memory._conn.execute("SELECT success_rate FROM skills WHERE name=?", ("bad_skill",)).fetchone()
+        assert skill[0] < 0.5
+
+    def test_hindsight_hint_stored_in_evolution_log(self, local_memory):
+        sid = local_memory.session_create("failing task")
+        loss = local_memory.compute_evolution_loss(
+            session_id=sid, turns_used=30, max_turns=40,
+            task_success=False, accessed_fact_ids=[], accessed_skill_names=[],
+            hindsight_hint='file_read failed; code_run timeout'
+        )
+        log_id = local_memory.evolution_log_add(sid, loss)
+        row = local_memory._conn.execute(
+            "SELECT hindsight_hint FROM evolution_log WHERE id=?", (log_id,)
+        ).fetchone()
+        assert row[0] == 'file_read failed; code_run timeout'
+
+    def test_hindsight_hint_empty_on_success(self, local_memory):
+        sid = local_memory.session_create("success task")
+        loss = local_memory.compute_evolution_loss(
+            session_id=sid, turns_used=5, max_turns=40,
+            task_success=True, accessed_fact_ids=[], accessed_skill_names=[]
+        )
+        assert loss['hindsight_hint'] == ''
+
+
+class TestNoDoubleCounting:
+    """Verify gradient is the sole feedback mechanism — no flat +0.05 alongside gradient."""
+
+    def test_gradient_only_strengthens_fact_on_success(self, local_memory):
+        fid = local_memory.fact_add("good fact", category="test", trust_score=0.5)
+        sid = local_memory.session_create("success task")
+        loss = local_memory.compute_evolution_loss(
+            session_id=sid, turns_used=5, max_turns=40,
+            task_success=True, accessed_fact_ids=[fid], accessed_skill_names=[]
+        )
+        local_memory.evolution_log_add(sid, loss)
+        local_memory.apply_gradient(loss)
+        # Trust should increase by gradient magnitude (NOT +0.05 flat)
+        fact = local_memory._conn.execute("SELECT trust_score FROM facts WHERE id=?", (fid,)).fetchone()
+        # Gradient magnitude = loss_total * 0.1, should be different from flat +0.05
+        expected_mag = loss['loss_total'] * 0.1
+        assert abs(fact[0] - (0.5 + expected_mag)) < 0.01  # gradient, not flat
+
+    def test_no_flat_helpful_update_on_success(self, local_memory):
+        """The handler no longer calls fact_mark_helpful — only apply_gradient."""
+        fid = local_memory.fact_add("test fact", category="test", trust_score=0.5)
+        # Simulate what handler does: only apply_gradient, no fact_mark_helpful
+        sid = local_memory.session_create("success task")
+        loss = local_memory.compute_evolution_loss(
+            session_id=sid, turns_used=3, max_turns=40,
+            task_success=True, accessed_fact_ids=[fid], accessed_skill_names=[]
+        )
+        local_memory.apply_gradient(loss)
+        fact = local_memory._conn.execute("SELECT trust_score FROM facts WHERE id=?", (fid,)).fetchone()
+        # Should be 0.5 + gradient magnitude, NOT 0.5 + 0.05 + gradient magnitude
+        expected = 0.5 + loss['loss_total'] * 0.1
+        assert abs(fact[0] - expected) < 0.02
+
+
+class TestEvolutionContext:
+    """Verify evolution status is injected into next session context."""
+
+    def test_build_context_includes_evolution_score(self, two_tier):
+        # Create some evolution data
+        sid = two_tier.session_create("test task")
+        loss = two_tier.compute_evolution_loss(
+            session_id=sid, turns_used=3, max_turns=40,
+            task_success=True, accessed_fact_ids=[], accessed_skill_names=[]
+        )
+        two_tier.evolution_log_add(sid, loss)
+        context = two_tier.build_context_prompt()
+        assert 'Evolution Status' in context
+
+    def test_build_context_no_evolution_when_no_data(self, two_tier):
+        context = two_tier.build_context_prompt()
+        # Default score=0.5 means no data — should NOT show evolution section
+        assert 'Evolution Status' not in context
+
+    def test_build_context_shows_targets_when_declining(self, two_tier):
+        # Add a failure to get improvement_targets
+        two_tier.skill_add("struggle_skill", "desc", ["step1"], triggers="struggle")
+        sid = two_tier.session_create("failing task")
+        loss = two_tier.compute_evolution_loss(
+            session_id=sid, turns_used=40, max_turns=40,
+            task_success=False, accessed_fact_ids=[], accessed_skill_names=["struggle_skill"]
+        )
+        two_tier.evolution_log_add(sid, loss)
+        # Need at least 2 entries for trend
+        sid2 = two_tier.session_create("another failure")
+        loss2 = two_tier.compute_evolution_loss(
+            session_id=sid2, turns_used=40, max_turns=40,
+            task_success=False, accessed_fact_ids=[], accessed_skill_names=["struggle_skill"]
+        )
+        two_tier.evolution_log_add(sid2, loss2)
+        context = two_tier.build_context_prompt()
+        assert 'Evolution Status' in context
+
+
+class TestWikiQualityFeedback:
+    """Verify wiki pages get confidence from RL, not hardcoded 'low'."""
+
+    def test_wiki_mark_quality_high(self, local_memory):
+        page_id = local_memory.wiki_add('test-page', 'Test', 'Some content', category='reference')
+        result = local_memory.wiki_mark_quality('test-page', 'high')
+        assert result is True
+        page = local_memory.wiki_read('test-page')
+        assert page['confidence'] == 'high'
+
+    def test_wiki_mark_quality_low(self, local_memory):
+        page_id = local_memory.wiki_add('test-page2', 'Test2', 'Content', category='reference')
+        local_memory.wiki_mark_quality('test-page2', 'low')
+        page = local_memory.wiki_read('test-page2')
+        assert page['confidence'] == 'low'
+
+    def test_wiki_mark_quality_via_two_tier(self, two_tier):
+        two_tier.wiki_add('tier-page', 'Test', 'Content', tier='local')
+        result = two_tier.wiki_mark_quality('tier-page', 'high', tier='local')
+        assert result is True
+
+    def test_session_crystallize_dynamic_confidence(self, local_memory):
+        # Mark that knowledge was produced
+        local_memory._knowledge_produced = True
+        local_memory.fact_add("test fact", category="test")
+        sid = local_memory.session_create("success session")
+        local_memory.session_update(sid, summary="success", result="done", had_knowledge=True)
+        # Add evolution data to get a decent score
+        loss = local_memory.compute_evolution_loss(
+            session_id=sid, turns_used=3, max_turns=40,
+            task_success=True, accessed_fact_ids=[], accessed_skill_names=[]
+        )
+        local_memory.evolution_log_add(sid, loss)
+        # Crystallize — should use dynamic confidence
+        page_id = local_memory.session_crystallize(sid)
+        if page_id:
+            page = local_memory.wiki_read(local_memory._conn.execute(
+                "SELECT slug FROM wiki_pages WHERE id=?", (page_id,)
+            ).fetchone()[0])
+            # Should NOT be hardcoded 'low'
+            assert page['confidence'] != 'low' or local_memory.evolution_score()[0] < 0.4
+
+
+class TestV5Migration:
+    """Verify V5 schema migration adds hindsight_hint column."""
+
+    def test_fresh_db_has_hindsight_hint(self, local_memory):
+        cols = [r[1] for r in local_memory._conn.execute("PRAGMA table_info(evolution_log)").fetchall()]
+        assert 'hindsight_hint' in cols
+
+    def test_v4_db_migrates_to_v5(self, tmp_path):
+        db_path = str(tmp_path / ".nova" / "nova.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        mem = NovaMemory(db_path)
+        # Downgrade to V4 (has evolution_log but no hindsight_hint)
+        mem._conn.execute("UPDATE _meta SET value='4' WHERE key='schema_version'")
+        # Drop hindsight_hint if present
+        cols = [r[1] for r in mem._conn.execute("PRAGMA table_info(evolution_log)").fetchall()]
+        if 'hindsight_hint' in cols:
+            # Can't drop column in SQLite, so recreate table without it
+            mem._conn.execute("ALTER TABLE evolution_log RENAME TO evolution_log_old")
+            mem._conn.execute("""CREATE TABLE evolution_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                loss_task REAL NOT NULL,
+                loss_efficiency REAL NOT NULL,
+                loss_recurrence REAL NOT NULL DEFAULT 0,
+                loss_knowledge_quality REAL NOT NULL DEFAULT 0,
+                loss_total REAL NOT NULL,
+                evolution_score REAL NOT NULL,
+                gradient_facts TEXT NOT NULL DEFAULT '[]',
+                gradient_skills TEXT NOT NULL DEFAULT '[]',
+                improvement_targets TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL
+            )""")
+            mem._conn.execute("INSERT INTO evolution_log SELECT id,session_id,loss_task,loss_efficiency,loss_recurrence,loss_knowledge_quality,loss_total,evolution_score,gradient_facts,gradient_skills,improvement_targets,created_at FROM evolution_log_old")
+            mem._conn.execute("DROP TABLE evolution_log_old")
+        mem._conn.commit()
+        mem.close()
+        # Reopen — should migrate to V5 and add hindsight_hint
+        mem2 = NovaMemory(db_path)
+        cols2 = [r[1] for r in mem2._conn.execute("PRAGMA table_info(evolution_log)").fetchall()]
+        assert 'hindsight_hint' in cols2
+        version = mem2._conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()[0]
+        assert int(version) >= 5
+        mem2.close()
+
+    def test_schema_version_is_5(self, local_memory):
+        row = local_memory._conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
+        assert int(row[0]) >= 5

@@ -676,24 +676,18 @@ class NovaHandler(BaseHandler):
         summary = smart_format(summary, max_str_len=100)
         self.history_info.append(f'[Agent] {summary}')
 
-        # Trust feedback: mark accessed facts as helpful when task succeeds
-        if exit_reason and exit_reason.get('result') in ('EXITED', 'CURRENT_TASK_DONE'):
-            for fid in self._accessed_fact_ids:
-                try:
-                    self.memory.fact_mark_helpful_by_id(fid)
-                except:
-                    pass
-            # Skill success feedback: mark accessed skills as successful
-            for skill_name in self._accessed_skill_names:
-                try:
-                    self.memory.skill_update_success(skill_name, success=True)
-                except:
-                    pass
-
         if turn % 7 == 0:
             next_prompt += f"\n[DANGER] Turn {turn}: If no progress, switch strategy or ask_user."
 
-        # Auto-crystallize at session end
+        # Trust decay on session end (lightweight maintenance)
+        if exit_reason:
+            try:
+                self.memory._local.apply_time_decay()
+                self.memory._global.apply_time_decay()
+            except:
+                pass
+
+        # Auto-crystallize at session end (only on success)
         if exit_reason and exit_reason.get('result') in ('EXITED', 'CURRENT_TASK_DONE'):
             task_desc = self.history_info[0] if self.history_info else 'unknown task'
             data = exit_reason.get('data', '')
@@ -701,45 +695,42 @@ class NovaHandler(BaseHandler):
                 data = str(data)[:500]
             had_knowledge = self.memory._knowledge_produced
             if self._session_id:
-                # Session was created at task start — just update it
                 self.memory.session_update(
                     self._session_id, summary=task_desc, result=data,
                     had_knowledge=had_knowledge
                 )
-                # Crystallize the existing session (creates wiki page)
                 self.memory.session_crystallize(self._session_id)
             else:
-                # No session_id — use old archive_session flow
                 self.memory.archive_session(task_desc, task_desc, data)
 
-            # Apply trust decay on session end (lightweight maintenance)
+        # Evolution loss: compute on ALL outcomes (success AND failure)
+        # Gradient is the sole feedback mechanism — no flat trust/skill updates
+        if exit_reason and self._session_id:
+            task_success = exit_reason.get('result') in ('EXITED', 'CURRENT_TASK_DONE')
+            # Extract hindsight hint from recent turns on failure (OPD-inspired)
+            hindsight_hint = ''
+            if not task_success and self.history_info:
+                hint = '; '.join(self.history_info[-3:])
+                hindsight_hint = hint[:200]
             try:
-                self.memory._local.apply_time_decay()
-                self.memory._global.apply_time_decay()
-            except:
-                pass
+                loss_data = self.memory.compute_evolution_loss(
+                    session_id=self._session_id,
+                    turns_used=turn,
+                    max_turns=40,
+                    task_success=task_success,
+                    accessed_fact_ids=self._accessed_fact_ids,
+                    accessed_skill_names=self._accessed_skill_names,
+                    hindsight_hint=hindsight_hint,
+                )
+                self.memory.evolution_log_add(self._session_id, loss_data)
+                self.memory.apply_gradient(loss_data)
 
-            # Evolution loss: compute, log, and apply gradient
-            if self._session_id:
-                try:
-                    task_success = exit_reason.get('result') in ('EXITED', 'CURRENT_TASK_DONE')
-                    loss_data = self.memory.compute_evolution_loss(
-                        session_id=self._session_id,
-                        turns_used=turn,
-                        max_turns=40,
-                        task_success=task_success,
-                        accessed_fact_ids=self._accessed_fact_ids,
-                        accessed_skill_names=self._accessed_skill_names,
-                    )
-                    self.memory.evolution_log_add(self._session_id, loss_data)
-                    self.memory.apply_gradient(loss_data)
-
-                    if loss_data['improvement_targets']:
-                        next_prompt += f"\n[Evolution] Negative gradient on: {', '.join(loss_data['improvement_targets'])}. "
-                        next_prompt += f"Evolution score: {loss_data['evolution_score']:.2f}. "
-                        next_prompt += "Autonomous mode should prioritize improving these skills."
-                except Exception as e:
-                    print(f"[Evolution] Error computing loss: {e}")
+                if loss_data['improvement_targets']:
+                    next_prompt += f"\n[Evolution] Negative gradient on: {', '.join(loss_data['improvement_targets'])}. "
+                    next_prompt += f"Evolution score: {loss_data['evolution_score']:.2f}. "
+                    next_prompt += "Autonomous mode should prioritize improving these skills."
+            except Exception as e:
+                print(f"[Evolution] Error computing loss: {e}")
 
         # Crystallization nudge — remind the agent to save knowledge before finishing
         if exit_reason and exit_reason.get('result') == 'CURRENT_TASK_DONE':

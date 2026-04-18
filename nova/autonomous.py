@@ -83,7 +83,20 @@ class AutonomousMonitor:
             prompt += "## Evolution Gradient (DECLINING — prioritize improvement)\n"
             prompt += "Evolution score is declining. Focus on skills that contributed to recent failures.\n"
             prompt += "Check `db_query SELECT improvement_targets,loss_total FROM evolution_log ORDER BY created_at DESC LIMIT 1` for gradient targets.\n"
-            prompt += "Priority formula: improvement_targets × loss_magnitude → fix highest-loss skill first.\n\n"
+            prompt += "Priority formula: improvement_targets × loss_magnitude → fix highest-loss skill first.\n"
+            # Inject hindsight hints from recent failures (OPD-inspired)
+            try:
+                hints = self.agent.memory._local._conn.execute(
+                    "SELECT hindsight_hint FROM evolution_log WHERE loss_task > 0 AND hindsight_hint != '' ORDER BY created_at DESC LIMIT 2"
+                ).fetchall()
+                if hints:
+                    prompt += "\n### Recent Failure Hints (what went wrong)\n"
+                    for h in hints:
+                        prompt += f"  - {h[0]}\n"
+                    prompt += "Use these hints to add pitfalls to relevant skills or improve their steps.\n"
+            except:
+                pass
+            prompt += "\n"
         elif stats['evolution_score'] < 0.5:
             prompt += "## Evolution Gradient (LOW — room for improvement)\n"
             prompt += "Evolution score is below 0.5. Consider refining skills and adding missing knowledge.\n\n"
