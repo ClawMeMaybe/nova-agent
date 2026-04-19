@@ -47,7 +47,15 @@ def _write_locked(method):
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS _meta (key TEXT UNIQUE, value TEXT);
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '8');
+
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS wiki_pages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +66,7 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
     tags TEXT NOT NULL DEFAULT '',
     confidence TEXT NOT NULL DEFAULT 'medium',
     sources TEXT NOT NULL DEFAULT '',
+    project_id TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -71,6 +80,8 @@ CREATE TABLE IF NOT EXISTS facts (
     retrieval_count INTEGER NOT NULL DEFAULT 0,
     helpful_count INTEGER NOT NULL DEFAULT 0,
     unhelpful_count INTEGER NOT NULL DEFAULT 0,
+    needs_review INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -87,6 +98,8 @@ CREATE TABLE IF NOT EXISTS skills (
     tags TEXT NOT NULL DEFAULT '',
     version INTEGER NOT NULL DEFAULT 1,
     last_improved_at TEXT NOT NULL DEFAULT '',
+    needs_review INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -98,8 +111,72 @@ CREATE TABLE IF NOT EXISTS sessions (
     result TEXT NOT NULL DEFAULT '',
     wiki_page_id INTEGER DEFAULT NULL,
     had_knowledge_output INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT DEFAULT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS session_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    turn_num INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL DEFAULT '',
+    tool_args TEXT NOT NULL DEFAULT '{}',
+    tool_result TEXT NOT NULL DEFAULT '',
+    thinking TEXT NOT NULL DEFAULT '',
+    project_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns(session_id, turn_num);
+
+CREATE TABLE IF NOT EXISTS evolution_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    loss_task REAL NOT NULL,
+    loss_efficiency REAL NOT NULL,
+    loss_recurrence REAL NOT NULL DEFAULT 0,
+    loss_knowledge_quality REAL NOT NULL DEFAULT 0,
+    loss_total REAL NOT NULL,
+    evolution_score REAL NOT NULL,
+    gradient_facts TEXT NOT NULL DEFAULT '[]',
+    gradient_skills TEXT NOT NULL DEFAULT '[]',
+    improvement_targets TEXT NOT NULL DEFAULT '[]',
+    hindsight_hint TEXT NOT NULL DEFAULT '',
+    project_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evolution_log_score ON evolution_log(evolution_score DESC);
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_type TEXT NOT NULL CHECK(target_type IN ('fact', 'skill')),
+    target_id INTEGER DEFAULT NULL,
+    target_name TEXT NOT NULL DEFAULT '',
+    helpful INTEGER NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    turn_num INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_target ON feedback_events(target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS knowledge_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL CHECK(source_type IN ('fact', 'skill', 'wiki')),
+    source_id INTEGER NOT NULL,
+    source_name TEXT NOT NULL DEFAULT '',
+    target_type TEXT NOT NULL CHECK(target_type IN ('fact', 'skill', 'wiki')),
+    target_id INTEGER NOT NULL,
+    target_name TEXT NOT NULL DEFAULT '',
+    link_type TEXT NOT NULL DEFAULT 'depends_on',
+    project_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_klinks_source ON knowledge_links(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_klinks_target ON knowledge_links(target_type, target_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
     title, content, tags, category,
@@ -203,12 +280,55 @@ CREATE TABLE IF NOT EXISTS session_turns (
     tool_args TEXT NOT NULL DEFAULT '{}',
     tool_result TEXT NOT NULL DEFAULT '',
     thinking TEXT NOT NULL DEFAULT '',
+    project_id TEXT DEFAULT NULL,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns(session_id, turn_num);
 
 -- Update schema version
 UPDATE _meta SET value = '3' WHERE key = 'schema_version';
+"""
+
+SCHEMA_V6 = """
+-- V6: Add feedback_events table for per-turn feedback on facts/skills
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_type TEXT NOT NULL CHECK(target_type IN ('fact', 'skill')),
+    target_id INTEGER DEFAULT NULL,
+    target_name TEXT NOT NULL DEFAULT '',
+    helpful INTEGER NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    turn_num INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_target ON feedback_events(target_type, target_id);
+
+-- Update schema version
+UPDATE _meta SET value = '6' WHERE key = 'schema_version';
+"""
+
+SCHEMA_V7 = """
+-- V7: Add knowledge_links table + needs_review flags for cascade evolution
+CREATE TABLE IF NOT EXISTS knowledge_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL CHECK(source_type IN ('fact', 'skill', 'wiki')),
+    source_id INTEGER NOT NULL,
+    source_name TEXT NOT NULL DEFAULT '',
+    target_type TEXT NOT NULL CHECK(target_type IN ('fact', 'skill', 'wiki')),
+    target_id INTEGER NOT NULL,
+    target_name TEXT NOT NULL DEFAULT '',
+    link_type TEXT NOT NULL DEFAULT 'depends_on',
+    project_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_klinks_source ON knowledge_links(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_klinks_target ON knowledge_links(target_type, target_id);
+
+-- Update schema version
+UPDATE _meta SET value = '7' WHERE key = 'schema_version';
 """
 
 SCHEMA_V4 = """
@@ -226,12 +346,40 @@ CREATE TABLE IF NOT EXISTS evolution_log (
     gradient_skills TEXT NOT NULL DEFAULT '[]',
     improvement_targets TEXT NOT NULL DEFAULT '[]',
     hindsight_hint TEXT NOT NULL DEFAULT '',
+    project_id TEXT DEFAULT NULL,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evolution_log_score ON evolution_log(evolution_score DESC);
 
 -- Update schema version
 UPDATE _meta SET value = '5' WHERE key = 'schema_version';
+"""
+
+SCHEMA_V8 = """
+-- V8: Add projects table and project_id columns for unified memory
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+ALTER TABLE facts ADD COLUMN project_id TEXT DEFAULT NULL;
+ALTER TABLE skills ADD COLUMN project_id TEXT DEFAULT NULL;
+ALTER TABLE wiki_pages ADD COLUMN project_id TEXT DEFAULT NULL;
+ALTER TABLE sessions ADD COLUMN project_id TEXT DEFAULT NULL;
+ALTER TABLE knowledge_links ADD COLUMN project_id TEXT DEFAULT NULL;
+ALTER TABLE feedback_events ADD COLUMN project_id TEXT DEFAULT NULL;
+ALTER TABLE session_turns ADD COLUMN project_id TEXT DEFAULT NULL;
+ALTER TABLE evolution_log ADD COLUMN project_id TEXT DEFAULT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project_id);
+CREATE INDEX IF NOT EXISTS idx_skills_project ON skills(project_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_project ON wiki_pages(project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+
+UPDATE _meta SET value = '8' WHERE key = 'schema_version';
 """
 
 SCHEMA_SQL = SCHEMA_V1
@@ -249,7 +397,7 @@ MAX_CONTEXT_CHARS = 3000  # Context budget to avoid token overflow
 
 DBQ_ALLOWED_OPS = {'SELECT', 'INSERT', 'UPDATE'}
 DBQ_BLOCKED_KEYWORDS = {'DROP', 'ALTER', 'CREATE', 'DELETE', 'ATTACH', 'DETACH', 'PRAGMA', 'REPLACE', 'VACUUM'}
-DBQ_ALLOWED_TABLES = {'wiki_pages', 'facts', 'skills', 'sessions', 'session_turns', 'evolution_log', '_meta'}
+DBQ_ALLOWED_TABLES = {'wiki_pages', 'facts', 'skills', 'sessions', 'session_turns', 'evolution_log', 'feedback_events', 'knowledge_links', '_meta'}
 DBQ_MAX_ROWS = 50
 DBQ_MAX_CHARS = 5000
 
@@ -295,16 +443,6 @@ def _fts_escape(query: str) -> str:
     return ' '.join(f'"{t}"' for t in terms)
 
 
-def _route_tier(category: str, tier: str) -> str:
-    """Determine which tier to use based on category and explicit tier override."""
-    if tier in ('local', 'global'):
-        return tier
-    # 'auto' routing: most categories default to local, explicit global categories override
-    LOCAL_CATEGORIES = {'environment', 'session-log', 'debugging', 'reference', 'general', 'architecture'}
-    GLOBAL_CATEGORIES = {'pattern', 'convention', 'decision'}
-    if category in GLOBAL_CATEGORIES:
-        return 'global'
-    return 'local'
 
 
 # ── NovaMemory (single DB) ──
@@ -314,6 +452,7 @@ class NovaMemory:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self.current_project_id = None  # None = global scope
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.RLock()  # Reentrant lock — allows nested calls (e.g. wiki_ingest → wiki_add)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -404,6 +543,80 @@ class NovaMemory:
             except Exception as e:
                 print(f"[Migration] V5 migration error: {e}")
 
+        if current_version < 6:
+            # V6: Add feedback_events table for per-turn feedback on facts/skills
+            try:
+                tables = [r[0] for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+                if 'feedback_events' not in tables:
+                    self._conn.executescript(SCHEMA_V6)
+                    self._conn.commit()
+                else:
+                    self._conn.execute("UPDATE _meta SET value='6' WHERE key='schema_version'")
+                    self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V6 migration error: {e}")
+
+        if current_version < 7:
+            # V7: Add knowledge_links table + needs_review columns
+            try:
+                tables = [r[0] for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+                if 'knowledge_links' not in tables:
+                    self._conn.executescript(SCHEMA_V7)
+                    self._conn.commit()
+                else:
+                    self._conn.execute("UPDATE _meta SET value='7' WHERE key='schema_version'")
+                    self._conn.commit()
+                # Add needs_review column if missing (conditional ALTER TABLE)
+                for table_name in ('facts', 'skills'):
+                    cols = [r[1] for r in self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+                    if 'needs_review' not in cols:
+                        self._conn.execute(f"ALTER TABLE {table_name} ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+                        self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V7 migration error: {e}")
+
+        if current_version < 8:
+            # V8: Add projects table + project_id columns (unified memory)
+            try:
+                # Create projects table if missing
+                tables = [r[0] for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+                if 'projects' not in tables:
+                    self._conn.execute(
+                        "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, "
+                        "description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                    )
+                    self._conn.commit()
+                # Add project_id column to each table if missing
+                for table_name in ('facts', 'skills', 'wiki_pages', 'sessions',
+                                   'knowledge_links', 'feedback_events', 'session_turns', 'evolution_log'):
+                    cols = [r[1] for r in self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+                    if 'project_id' not in cols:
+                        self._conn.execute(f"ALTER TABLE {table_name} ADD COLUMN project_id TEXT DEFAULT NULL")
+                        self._conn.commit()
+                # Create indexes
+                for idx in ('idx_facts_project', 'idx_skills_project', 'idx_wiki_project', 'idx_sessions_project'):
+                    try:
+                        if 'facts' in idx:
+                            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project_id)")
+                        elif 'skills' in idx:
+                            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_project ON skills(project_id)")
+                        elif 'wiki' in idx:
+                            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_wiki_project ON wiki_pages(project_id)")
+                        elif 'sessions' in idx:
+                            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
+                    except Exception:
+                        pass
+                self._conn.execute("UPDATE _meta SET value='8' WHERE key='schema_version'")
+                self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V8 migration error: {e}")
+
     def _seed_defaults(self):
         if self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE slug='meta-rules'").fetchone()[0] == 0:
             self.wiki_add('meta-rules', 'Meta Rules', DEFAULT_META_RULES,
@@ -419,7 +632,106 @@ class NovaMemory:
             except sqlite3.IntegrityError:
                 pass
 
-    # ── Query helpers (Fix #7: avoid direct _conn coupling in TwoTierMemory) ──
+    # ── Project Management ──
+
+    def project_create(self, name: str, description: str = '') -> str:
+        """Create a new project and return its UUID."""
+        import uuid
+        project_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        self._conn.execute(
+            "INSERT INTO projects (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (project_id, name, description, now, now)
+        )
+        self._conn.commit()
+        return project_id
+
+    def project_select(self, project_id: Optional[str]) -> None:
+        """Set the current project scope. None resets to global scope."""
+        if project_id is not None:
+            row = self._conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+            if not row:
+                raise ValueError(f"Project {project_id} not found")
+        self.current_project_id = project_id
+
+    def project_list(self) -> List[Dict]:
+        """Return all projects."""
+        rows = self._conn.execute("SELECT id, name, description, created_at, updated_at FROM projects ORDER BY created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def project_info(self, project_id: str) -> Optional[Dict]:
+        """Return project details including scoped knowledge counts."""
+        row = self._conn.execute("SELECT id, name, description, created_at, updated_at FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not row:
+            return None
+        info = dict(row)
+        info['facts_count'] = self._conn.execute("SELECT COUNT(*) FROM facts WHERE project_id=?", (project_id,)).fetchone()[0]
+        info['skills_count'] = self._conn.execute("SELECT COUNT(*) FROM skills WHERE project_id=?", (project_id,)).fetchone()[0]
+        info['wiki_count'] = self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE project_id=?", (project_id,)).fetchone()[0]
+        info['sessions_count'] = self._conn.execute("SELECT COUNT(*) FROM sessions WHERE project_id=?", (project_id,)).fetchone()[0]
+        return info
+
+    def project_delete(self, project_id: str) -> bool:
+        """Delete a project and all its scoped data."""
+        row = self._conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not row:
+            return False
+        self._conn.execute("DELETE FROM session_turns WHERE session_id IN (SELECT id FROM sessions WHERE project_id=?)", (project_id,))
+        self._conn.execute("DELETE FROM feedback_events WHERE session_id IN (SELECT id FROM sessions WHERE project_id=?)", (project_id,))
+        self._conn.execute("DELETE FROM knowledge_links WHERE project_id=?", (project_id,))
+        self._conn.execute("DELETE FROM evolution_log WHERE session_id IN (SELECT id FROM sessions WHERE project_id=?)", (project_id,))
+        self._conn.execute("DELETE FROM sessions WHERE project_id=?", (project_id,))
+        self._conn.execute("DELETE FROM facts WHERE project_id=?", (project_id,))
+        self._conn.execute("DELETE FROM skills WHERE project_id=?", (project_id,))
+        self._conn.execute("DELETE FROM wiki_pages WHERE project_id=?", (project_id,))
+        self._conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        self._conn.commit()
+        if self.current_project_id == project_id:
+            self.current_project_id = None
+        return True
+
+    # ── Knowledge Promotion ──
+
+    def fact_promote(self, fact_id: int) -> bool:
+        """Promote a scoped fact to global (set project_id=NULL)."""
+        count = self._conn.execute("UPDATE facts SET project_id=NULL WHERE id=?", (fact_id,)).rowcount
+        self._conn.commit()
+        return count > 0
+
+    def skill_promote(self, skill_name: str) -> bool:
+        """Promote a scoped skill to global (set project_id=NULL)."""
+        count = self._conn.execute("UPDATE skills SET project_id=NULL WHERE name=?", (skill_name,)).rowcount
+        self._conn.commit()
+        return count > 0
+
+    def wiki_promote(self, slug: str) -> bool:
+        """Promote a scoped wiki page to global (set project_id=NULL)."""
+        count = self._conn.execute("UPDATE wiki_pages SET project_id=NULL WHERE slug=?", (slug,)).rowcount
+        self._conn.commit()
+        return count > 0
+
+    # ── Query helpers ──
+
+    def _scope_where(self, prefix: str = '') -> str:
+        """Generate WHERE clause for project scoping.
+        When project is selected: WHERE (project_id = ? OR project_id IS NULL)
+        When global: WHERE project_id IS NULL
+        prefix: table alias prefix (e.g. 'f.' for facts)
+        """
+        col = f"{prefix}project_id"
+        if self.current_project_id is not None:
+            return f"({col} = ? OR {col} IS NULL)"
+        return f"{col} IS NULL"
+
+    def _scope_params(self) -> list:
+        """Return params for _scope_where. Empty list if global, [project_id] if scoped."""
+        if self.current_project_id is not None:
+            return [self.current_project_id]
+        return []
+
+    def _scope_write_id(self) -> Optional[str]:
+        """Return project_id for write operations. None for global scope."""
+        return self.current_project_id
 
     def get_high_trust_facts(self, min_trust=0.7, limit=10) -> List[Dict]:
         """Get facts above trust threshold."""
@@ -476,6 +788,39 @@ class NovaMemory:
     def avg_trust(self) -> float:
         return self._conn.execute("SELECT AVG(trust_score) FROM facts").fetchone()[0] or 0
 
+    def count_feedback_events(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM feedback_events").fetchone()[0]
+
+    def get_items_needing_review(self) -> Dict:
+        """Get facts and skills flagged for review."""
+        facts = self._conn.execute("SELECT id, content, category, trust_score FROM facts WHERE needs_review=1").fetchall()
+        skills = self._conn.execute("SELECT id, name, success_rate FROM skills WHERE needs_review=1").fetchall()
+        return {
+            'facts_needing_review': [{'id': r['id'], 'content': r['content'], 'category': r['category'], 'trust_score': r['trust_score']} for r in facts],
+            'skills_needing_review': [{'id': r['id'], 'name': r['name'], 'success_rate': r['success_rate']} for r in skills],
+        }
+
+    def mark_reviewed(self, item_type: str, item_id: int) -> bool:
+        """Mark a fact or skill as reviewed (clear needs_review flag)."""
+        if item_type not in ('facts', 'skills'):
+            return False
+        count = self._conn.execute(f"UPDATE {item_type} SET needs_review=0 WHERE id=?", (item_id,)).rowcount
+        self._conn.commit()
+        return count > 0
+
+    def session_feedback_quality(self, session_id: int) -> Dict:
+        """Return helpful/unhelpful counts from feedback_events for a session."""
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM feedback_events WHERE session_id=?", (session_id,)
+        ).fetchone()[0]
+        helpful = self._conn.execute(
+            "SELECT COUNT(*) FROM feedback_events WHERE session_id=? AND helpful=1", (session_id,)
+        ).fetchone()[0]
+        unhelpful = self._conn.execute(
+            "SELECT COUNT(*) FROM feedback_events WHERE session_id=? AND helpful=0", (session_id,)
+        ).fetchone()[0]
+        return {'helpful_count': helpful, 'unhelpful_count': unhelpful, 'total_count': total}
+
     # ── Wiki Operations ──
 
     def _make_slug(self, title: str) -> str:
@@ -492,8 +837,8 @@ class NovaMemory:
         now = datetime.now().isoformat()
         try:
             cur = self._conn.execute(
-                "INSERT INTO wiki_pages (slug,title,category,content,tags,confidence,sources,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (slug, title, category, content, tags, confidence, sources, now, now)
+                "INSERT INTO wiki_pages (slug,title,category,content,tags,confidence,sources,project_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (slug, title, category, content, tags, confidence, sources, self._scope_write_id(), now, now)
             )
             self._conn.commit()
             return cur.lastrowid
@@ -575,7 +920,12 @@ class NovaMemory:
                                  tags=tags, confidence=confidence, sources=sources)
 
     def wiki_read(self, slug: str) -> Optional[Dict]:
-        row = self._conn.execute("SELECT * FROM wiki_pages WHERE slug=?", (slug,)).fetchone()
+        # When project selected, try project-scoped first, then global
+        if self.current_project_id is not None:
+            row = self._conn.execute("SELECT * FROM wiki_pages WHERE slug=? AND project_id=?", (slug, self.current_project_id)).fetchone()
+            if row:
+                return dict(row)
+        row = self._conn.execute("SELECT * FROM wiki_pages WHERE slug=? AND project_id IS NULL", (slug,)).fetchone()
         if row:
             return dict(row)
         return None
@@ -593,11 +943,13 @@ class NovaMemory:
                 where = f"id IN ({','.join(str(i) for i in ids)})"
                 params = []
                 cat_clause = ""
+                scope_clause = f" AND {self._scope_where()}"
+                params.extend(self._scope_params())
                 if category:
                     cat_clause = " AND category=?"
                     params.append(category)
                 rows = self._conn.execute(
-                    f"SELECT * FROM wiki_pages WHERE {where}{cat_clause} ORDER BY updated_at DESC",
+                    f"SELECT * FROM wiki_pages WHERE {where}{cat_clause}{scope_clause} ORDER BY updated_at DESC",
                     params
                 ).fetchall()
                 # Fix #1: Exclude session-log pages from search results (they're noise)
@@ -611,8 +963,8 @@ class NovaMemory:
                 cat_filter = " AND category=?"
                 params.append(category)
             all_pages = self._conn.execute(
-                f"SELECT * FROM wiki_pages WHERE category != 'session-log'{cat_filter}",
-                params
+                f"SELECT * FROM wiki_pages WHERE category != 'session-log' AND {self._scope_where()}{cat_filter}",
+                self._scope_params() + params
             ).fetchall()
             for page in all_pages:
                 page_tags = set(page['tags'].split(',')) if page['tags'] else set()
@@ -624,8 +976,8 @@ class NovaMemory:
 
         if not query and not tags and category:
             rows = self._conn.execute(
-                "SELECT * FROM wiki_pages WHERE category=? ORDER BY updated_at DESC LIMIT ?",
-                (category, limit)
+                f"SELECT * FROM wiki_pages WHERE category=? AND {self._scope_where()} ORDER BY updated_at DESC LIMIT ?",
+                [category] + self._scope_params() + [limit]
             ).fetchall()
             results = [dict(r) for r in rows]
 
@@ -636,7 +988,8 @@ class NovaMemory:
 
     def wiki_list(self) -> List[Dict]:
         rows = self._conn.execute(
-            "SELECT id,slug,title,category,tags,confidence,updated_at FROM wiki_pages ORDER BY updated_at DESC"
+            f"SELECT id,slug,title,category,tags,confidence,project_id,updated_at FROM wiki_pages WHERE {self._scope_where()} ORDER BY updated_at DESC",
+            self._scope_params()
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -679,10 +1032,11 @@ class NovaMemory:
     def fact_add(self, content: str, category: str = 'general',
                  tags: str = '', trust_score: float = 0.5) -> int:
         now = datetime.now().isoformat()
+        project_id = self._scope_write_id()
         try:
             cur = self._conn.execute(
-                "INSERT INTO facts (content,category,tags,trust_score,created_at,updated_at) VALUES (?,?,?,?,?,?)",
-                (content, category, tags, trust_score, now, now)
+                "INSERT INTO facts (content,category,tags,trust_score,project_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (content, category, tags, trust_score, project_id, now, now)
             )
             self._conn.commit()
             return cur.lastrowid
@@ -710,6 +1064,10 @@ class NovaMemory:
         if category:
             where_clauses.append("category=?")
             params.append(category)
+        # Project scoping: show global + current project facts
+        scope = self._scope_where()
+        where_clauses.append(scope)
+        params.extend(self._scope_params())
         where = " AND ".join(where_clauses)
         rows = self._conn.execute(
             f"SELECT * FROM facts WHERE {where} ORDER BY trust_score DESC LIMIT ?", params + [limit]
@@ -750,6 +1108,218 @@ class NovaMemory:
         )
         self._conn.commit()
 
+    @_write_locked
+    def fact_mark_unhelpful_by_id(self, fact_id: int) -> None:
+        """Mark a fact as unhelpful by its ID — used by feedback_event_add."""
+        self._conn.execute(
+            "UPDATE facts SET trust_score=MAX(trust_score-0.10,0.0), unhelpful_count=unhelpful_count+1, updated_at=? WHERE id=?",
+            (datetime.now().isoformat(), fact_id)
+        )
+        self._conn.commit()
+
+    @_write_locked
+    def feedback_event_add(self, target_type: str, target_id: Optional[int],
+                           target_name: str, helpful: bool, reason: str,
+                           session_id: int, turn_num: int) -> int:
+        """Record a feedback event and update the target's trust/success metrics."""
+        now = datetime.now().isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO feedback_events (target_type,target_id,target_name,helpful,reason,session_id,turn_num,project_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (target_type, target_id, target_name, int(helpful), reason, session_id, turn_num, self._scope_write_id(), now)
+        )
+        self._conn.commit()
+
+        # Update the target's trust/success metrics
+        if target_type == 'fact' and target_id is not None:
+            if helpful:
+                self.fact_mark_helpful_by_id(target_id)
+            else:
+                self.fact_mark_unhelpful_by_id(target_id)
+        elif target_type == 'skill' and target_name:
+            self.skill_update_success(target_name, success=helpful)
+
+        # Cascade: flag linked items for review when feedback is negative
+        if not helpful:
+            # Find all links where this target is the source — flag linked targets
+            links = self.link_search(source_type=target_type,
+                                     source_id=target_id if target_id else None)
+            for lk in links:
+                if lk['target_type'] == 'fact' and lk['target_id']:
+                    self._conn.execute("UPDATE facts SET needs_review=1 WHERE id=?", (lk['target_id'],))
+                elif lk['target_type'] == 'skill' and lk['target_name']:
+                    self._conn.execute("UPDATE skills SET needs_review=1 WHERE name=?", (lk['target_name'],))
+            self._conn.commit()
+
+        return cur.lastrowid
+
+    # ── Knowledge Link Operations ──
+
+    @_write_locked
+    def link_add(self, source_type: str, source_id: int, source_name: str,
+                 target_type: str, target_id: int, target_name: str,
+                 link_type: str = 'depends_on') -> int:
+        """Create a link between two knowledge items."""
+        now = datetime.now().isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO knowledge_links (source_type,source_id,source_name,target_type,target_id,target_name,link_type,project_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (source_type, source_id, source_name, target_type, target_id, target_name, link_type, self._scope_write_id(), now)
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def link_search(self, source_type: str = None, source_id: int = None,
+                    target_type: str = None, target_id: int = None,
+                    link_type: str = None) -> List[Dict]:
+        """Search knowledge links by optional filters."""
+        clauses = []
+        params = []
+        if source_type:
+            clauses.append("source_type=?")
+            params.append(source_type)
+        if source_id is not None:
+            clauses.append("source_id=?")
+            params.append(source_id)
+        if target_type:
+            clauses.append("target_type=?")
+            params.append(target_type)
+        if target_id is not None:
+            clauses.append("target_id=?")
+            params.append(target_id)
+        if link_type:
+            clauses.append("link_type=?")
+            params.append(link_type)
+        clauses.append(self._scope_where())
+        params.extend(self._scope_params())
+        where = " AND ".join(clauses) if clauses else "1=1"
+        rows = self._conn.execute(
+            f"SELECT * FROM knowledge_links WHERE {where} ORDER BY created_at DESC", params
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @_write_locked
+    def link_delete(self, link_id: int) -> bool:
+        """Delete a single knowledge link."""
+        count = self._conn.execute("DELETE FROM knowledge_links WHERE id=?", (link_id,)).rowcount
+        self._conn.commit()
+        return count > 0
+
+    # ── Cluster Search (tag-based inference) ──
+
+    def cluster_search(self, query: str, min_relevance: float = 0.3,
+                       limit: int = 5) -> List[Dict]:
+        """Search for composed knowledge bundles by tag overlap and category matching.
+
+        Returns bundles grouped by common tags: {topic_tag, facts, skills, wiki_pages, relevance_score}
+        """
+        keywords = self._extract_keywords(query)
+        if not keywords:
+            return []
+
+        # Build query tag set from keywords
+        query_tags = set(keywords)
+
+        # Find matching facts (tag overlap + category match)
+        fact_results = []
+        for kw in keywords[:5]:
+            for f in self.fact_search(kw, min_trust=0.3, limit=10):
+                f_tags = set(t.strip().lower() for t in f.get('tags', '').split(',') if t.strip())
+                overlap = len(query_tags & f_tags)
+                max_tags = max(len(query_tags), len(f_tags), 1)
+                relevance = overlap / max_tags if overlap > 0 else 0.3 if f.get('category', '') in query_tags else 0.0
+                if relevance >= min_relevance:
+                    f['_relevance'] = relevance
+                    fact_results.append(f)
+
+        # Find matching skills
+        skill_results = []
+        for kw in keywords[:5]:
+            for s in self.skill_search(kw, min_success=0.3, limit=10):
+                s_tags = set(t.strip().lower() for t in s.get('tags', '').split(',') if t.strip())
+                overlap = len(query_tags & s_tags)
+                max_tags = max(len(query_tags), len(s_tags), 1)
+                relevance = overlap / max_tags if overlap > 0 else 0.3 if any(kw in s.get('triggers', '') for kw in keywords[:3]) else 0.0
+                if relevance >= min_relevance:
+                    s['_relevance'] = relevance
+                    skill_results.append(s)
+
+        # Find matching wiki pages
+        wiki_results = []
+        for kw in keywords[:3]:
+            for p in self.wiki_query(kw, limit=5):
+                p_tags = set(t.strip().lower() for t in p.get('tags', '').split(',') if t.strip())
+                overlap = len(query_tags & p_tags)
+                max_tags = max(len(query_tags), len(p_tags), 1)
+                relevance = overlap / max_tags if overlap > 0 else 0.3 if p.get('category', '') in query_tags else 0.0
+                if relevance >= min_relevance:
+                    p['_relevance'] = relevance
+                    wiki_results.append(p)
+
+        # Deduplicate results
+        seen_facts = set()
+        unique_facts = []
+        for f in fact_results:
+            key = f.get('id', f.get('content', ''))
+            if key not in seen_facts:
+                seen_facts.add(key)
+                unique_facts.append(f)
+
+        seen_skills = set()
+        unique_skills = []
+        for s in skill_results:
+            key = s.get('name', '')
+            if key not in seen_skills:
+                seen_skills.add(key)
+                unique_skills.append(s)
+
+        seen_wiki = set()
+        unique_wiki = []
+        for p in wiki_results:
+            key = p.get('slug', p.get('title', ''))
+            if key not in seen_wiki:
+                seen_wiki.add(key)
+                unique_wiki.append(p)
+
+        # Group by best matching tag (topic)
+        if not unique_facts and not unique_skills and not unique_wiki:
+            return []
+
+        # Find the highest-relevance common tag as topic
+        all_tags_with_relevance = {}
+        for f in unique_facts:
+            for t in set(t.strip().lower() for t in f.get('tags', '').split(',') if t.strip()):
+                all_tags_with_relevance[t] = all_tags_with_relevance.get(t, 0) + f['_relevance']
+        for s in unique_skills:
+            for t in set(t.strip().lower() for t in s.get('tags', '').split(',') if t.strip()):
+                all_tags_with_relevance[t] = all_tags_with_relevance.get(t, 0) + s['_relevance']
+        for p in unique_wiki:
+            for t in set(t.strip().lower() for t in p.get('tags', '').split(',') if t.strip()):
+                all_tags_with_relevance[t] = all_tags_with_relevance.get(t, 0) + p['_relevance']
+
+        top_tags = sorted(all_tags_with_relevance.keys(), key=lambda t: all_tags_with_relevance[t], reverse=True)[:limit]
+
+        # Build bundles by topic tag
+        bundles = []
+        for tag in top_tags:
+            tag_facts = [f for f in unique_facts if tag in set(t.strip().lower() for t in f.get('tags', '').split(','))]
+            tag_skills = [s for s in unique_skills if tag in set(t.strip().lower() for t in s.get('tags', '').split(','))]
+            tag_wiki = [p for p in unique_wiki if tag in set(t.strip().lower() for t in p.get('tags', '').split(','))]
+            if not tag_facts and not tag_skills and not tag_wiki:
+                continue
+            # Clean _relevance from output
+            clean_facts = [{k: v for k, v in f.items() if k != '_relevance'} for f in tag_facts]
+            clean_skills = [{k: v for k, v in s.items() if k != '_relevance'} for s in tag_skills]
+            clean_wiki = [{k: v for k, v in p.items() if k != '_relevance'} for p in tag_wiki]
+            avg_relevance = (sum(f['_relevance'] for f in tag_facts) + sum(s['_relevance'] for s in tag_skills) + sum(p['_relevance'] for p in tag_wiki)) / max(len(tag_facts) + len(tag_skills) + len(tag_wiki), 1)
+            bundles.append({
+                'topic_tag': tag,
+                'facts': clean_facts,
+                'skills': clean_skills,
+                'wiki_pages': clean_wiki,
+                'relevance_score': round(avg_relevance, 3),
+            })
+
+        return sorted(bundles, key=lambda b: b['relevance_score'], reverse=True)[:limit]
+
     # ── Skill/SOP Operations ──
 
     @_write_locked
@@ -761,8 +1331,8 @@ class NovaMemory:
         now = datetime.now().isoformat()
         try:
             cur = self._conn.execute(
-                "INSERT INTO skills (name,description,steps,triggers,pitfalls,success_rate,tags,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (name, description, steps_json, triggers, pitfalls_json, success_rate, tags, now, now)
+                "INSERT INTO skills (name,description,steps,triggers,pitfalls,success_rate,tags,project_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (name, description, steps_json, triggers, pitfalls_json, success_rate, tags, self._scope_write_id(), now, now)
             )
             self._conn.commit()
             return cur.lastrowid
@@ -786,6 +1356,9 @@ class NovaMemory:
 
         where_clauses = [f"id IN ({','.join(str(i) for i in ids)})", "success_rate >= ?"]
         params = [min_success]
+        scope = self._scope_where()
+        where_clauses.append(scope)
+        params.extend(self._scope_params())
         where = " AND ".join(where_clauses)
         rows = self._conn.execute(
             f"SELECT * FROM skills WHERE {where} ORDER BY success_rate DESC, usage_count DESC LIMIT ?", params + [limit]
@@ -891,14 +1464,15 @@ class NovaMemory:
             conditions.append(
                 f"(triggers LIKE ? OR name LIKE ? OR description LIKE ? OR tags LIKE ?)"
             )
-        where = "(" + " OR ".join(conditions) + ") AND success_rate >= ?"
+        where = "(" + " OR ".join(conditions) + ") AND success_rate >= ? AND " + self._scope_where()
 
-        # Build params — each keyword produces 4 LIKE params, plus min_success
+        # Build params — each keyword produces 4 LIKE params, plus min_success, plus scope params
         params = []
         for kw in keywords[:5]:
             like_val = f'%{kw}%'
             params.extend([like_val, like_val, like_val, like_val])
         params.append(min_success)
+        params.extend(self._scope_params())
 
         rows = self._conn.execute(
             f"SELECT * FROM skills WHERE {where} ORDER BY success_rate DESC, usage_count DESC LIMIT ?",
@@ -932,8 +1506,8 @@ class NovaMemory:
         """Create a session record at task start (summary/result filled later)."""
         now = datetime.now().isoformat()
         cur = self._conn.execute(
-            "INSERT INTO sessions (task,summary,result,had_knowledge_output,created_at) VALUES (?,?,'',0,?)",
-            (task[:200], '', now)
+            "INSERT INTO sessions (task,summary,result,had_knowledge_output,project_id,created_at) VALUES (?,?,'',0,?,?)",
+            (task[:200], '', self._scope_write_id(), now)
         )
         self._conn.commit()
         return cur.lastrowid
@@ -1054,8 +1628,11 @@ class NovaMemory:
             recurrence += past_failures * 0.1
         loss_recurrence = min(recurrence, 1.0)
 
-        # loss_knowledge_quality: (1 - helpful_ratio) of accessed facts
-        if accessed_fact_ids:
+        # loss_knowledge_quality: use feedback_events if available, fallback to helpful_count
+        fb_quality = self.session_feedback_quality(session_id)
+        if fb_quality['total_count'] > 0:
+            helpful_ratio = fb_quality['helpful_count'] / max(fb_quality['total_count'], len(accessed_fact_ids) if accessed_fact_ids else 1)
+        elif accessed_fact_ids:
             helpful = 0
             for fid in accessed_fact_ids:
                 fact = self._conn.execute("SELECT helpful_count, unhelpful_count FROM facts WHERE id=?", (fid,)).fetchone()
@@ -1086,8 +1663,16 @@ class NovaMemory:
                 magnitude = abs(loss_total * 0.2)
                 gradient_skills.append({'name': sname, 'direction': direction, 'magnitude': round(magnitude, 3)})
 
-        # Improvement targets: skills with negative gradient
+        # Improvement targets: skills with negative gradient + items needing review when declining
         improvement_targets = [g['name'] for g in gradient_skills if g['direction'] == '-']
+        # When evolution is declining, also include items flagged for review
+        _, trend = self.evolution_score()
+        if trend < 0:
+            review_items = self.get_items_needing_review()
+            for f in review_items['facts_needing_review']:
+                improvement_targets.append(f"fact:{f['content'][:30]}")
+            for s in review_items['skills_needing_review']:
+                improvement_targets.append(f"skill:{s['name']}")
 
         # Evolution score (inverse of rolling average loss over last 5 sessions)
         recent_losses = self._conn.execute(
@@ -1198,6 +1783,45 @@ class NovaMemory:
         words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
         return [w for w in words if w not in stopwords]
 
+    def proactive_recall(self, task_prompt: str) -> str:
+        """Inject relevant prior knowledge at task start.
+
+        Extracts keywords from the task, searches facts (high-trust only),
+        and returns a compact context block to prepend to the user input.
+        """
+        keywords = self._extract_keywords(task_prompt)
+        if not keywords:
+            return ""
+
+        scope_where = self._scope_where('f.')
+        scope_params = self._scope_params()
+
+        results = []
+        for kw in keywords[:5]:  # Limit keyword expansion
+            query = f"SELECT f.id, f.content, f.category, f.trust_score, f.tags FROM facts f INNER JOIN facts_fts ON f.id = facts_fts.rowid WHERE {scope_where} AND facts_fts MATCH ? ORDER BY f.trust_score DESC LIMIT 10"
+            try:
+                rows = self._conn.execute(query, [kw] + scope_params).fetchall()
+                for r in rows:
+                    results.append(dict(r))
+            except Exception:
+                pass
+
+        if not results:
+            return ""
+
+        # Dedup by id
+        seen = set()
+        unique = []
+        for r in results:
+            if r['id'] not in seen:
+                seen.add(r['id'])
+                unique.append(r)
+
+        lines = ["[Proactive Recall — proven facts relevant to this task]"]
+        for f in unique[:5]:
+            lines.append(f"  [{f['category']}] {f['content']} (trust: {f['trust_score']:.2f})")
+        return "\n".join(lines)
+
     def session_crystallize(self, session_id: int) -> Optional[int]:
         """Fix #1: Only crystallize sessions that produced knowledge artifacts."""
         session = self._conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
@@ -1228,6 +1852,11 @@ class NovaMemory:
         # Delete session_turns for old sessions first (FK child)
         self._conn.execute(
             "DELETE FROM session_turns WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ?)",
+            (cutoff_str,)
+        )
+        # Delete feedback_events for old sessions
+        self._conn.execute(
+            "DELETE FROM feedback_events WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ?)",
             (cutoff_str,)
         )
         # Delete old session-log wiki pages
@@ -1306,7 +1935,7 @@ class NovaMemory:
 
     # ── Context Builder (with budget limit — Fix #3) ──
 
-    def build_context_prompt(self) -> str:
+    def build_context_prompt(self, task_prompt: str = '') -> str:
         """Build compact context injection — meta rules + catalog, not full dumps.
 
         The agent has db_query/fact_search/wiki_query for retrieval.
@@ -1321,39 +1950,40 @@ class NovaMemory:
             prompt += f"\n[L0 — Meta Rules]\n{meta['content']}\n"
 
         # Catalog — what knowledge is available (not the knowledge itself)
-        local_facts = self.count_facts()
-        global_facts = self._global.count_facts()
-        local_wiki = self.count_wiki_pages()
-        global_wiki = self._global.count_wiki_pages()
-        local_skills = self.count_skills()
-        global_skills = self._global.count_skills()
+        total_facts = self.count_facts()
+        global_facts = self._conn.execute(
+            "SELECT COUNT(*) FROM facts WHERE project_id IS NULL"
+        ).fetchone()[0]
+        project_facts = total_facts - global_facts
+        total_wiki = self.count_wiki_pages()
+        global_wiki = self._conn.execute(
+            "SELECT COUNT(*) FROM wiki_pages WHERE project_id IS NULL"
+        ).fetchone()[0]
+        project_wiki = total_wiki - global_wiki
+        total_skills = self.count_skills()
+        global_skills = self._conn.execute(
+            "SELECT COUNT(*) FROM skills WHERE project_id IS NULL"
+        ).fetchone()[0]
+        project_skills = total_skills - global_skills
 
         # Category breakdown for routing hints
-        local_cats = self._conn.execute(
-            "SELECT category, COUNT(*) as cnt FROM facts GROUP BY category ORDER BY cnt DESC"
-        ).fetchall()
-        global_cats = self._global._conn.execute(
+        cats = self._conn.execute(
             "SELECT category, COUNT(*) as cnt FROM facts GROUP BY category ORDER BY cnt DESC"
         ).fetchall()
 
         prompt += "\n[Knowledge Catalog]\n"
-        prompt += f"  Facts: {local_facts} local + {global_facts} global\n"
-        if local_cats:
-            prompt += f"  Local categories: {', '.join(f'{r[0]}({r[1]})' for r in local_cats[:5])}\n"
-        if global_cats:
-            prompt += f"  Global categories: {', '.join(f'{r[0]}({r[1]})' for r in global_cats[:5])}\n"
-        prompt += f"  Wiki: {local_wiki} local + {global_wiki} global pages\n"
-        prompt += f"  Skills: {local_skills} local + {global_skills} global SOPs\n"
+        prompt += f"  Facts: {project_facts} project + {global_facts} global (total {total_facts})\n"
+        if cats:
+            prompt += f"  Categories: {', '.join(f'{r[0]}({r[1]})' for r in cats[:5])}\n"
+        prompt += f"  Wiki: {project_wiki} project + {global_wiki} global (total {total_wiki}) pages\n"
+        prompt += f"  Skills: {project_skills} project + {global_skills} global (total {total_skills}) SOPs\n"
 
         # Top 3 highest-trust facts only — proven reliable, worth always showing
         top3 = self.get_high_trust_facts(min_trust=0.7, limit=3)
-        global_top3 = self._global.get_high_trust_facts(min_trust=0.7, limit=3)
-        if top3 or global_top3:
+        if top3:
             prompt += "\n[Proven Facts (trust > 0.7)]\n"
             for f in top3:
-                prompt += f"  [local] {f['content']}\n"
-            for f in global_top3:
-                prompt += f"  [global] {f['content']}\n"
+                prompt += f"  {f['content']}\n"
 
         # Evolution status — RL direction for next session
         ev_score, ev_trend = self.evolution_score()
@@ -1438,14 +2068,40 @@ class NovaMemory:
 
     def stats(self) -> Dict:
         ev_score, ev_trend = self.evolution_score()
+        total_facts = self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        global_facts = self._conn.execute("SELECT COUNT(*) FROM facts WHERE project_id IS NULL").fetchone()[0]
+        project_facts = 0
+        if self.current_project_id:
+            project_facts = self._conn.execute("SELECT COUNT(*) FROM facts WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
+        total_skills = self._conn.execute("SELECT COUNT(*) FROM skills").fetchone()[0]
+        global_skills = self._conn.execute("SELECT COUNT(*) FROM skills WHERE project_id IS NULL").fetchone()[0]
+        project_skills = 0
+        if self.current_project_id:
+            project_skills = self._conn.execute("SELECT COUNT(*) FROM skills WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
+        total_wiki = self._conn.execute("SELECT COUNT(*) FROM wiki_pages").fetchone()[0]
+        global_wiki = self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE project_id IS NULL").fetchone()[0]
+        project_wiki = 0
+        if self.current_project_id:
+            project_wiki = self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
+        total_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        global_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions WHERE project_id IS NULL").fetchone()[0]
+        avg_trust = self._conn.execute("SELECT AVG(trust_score) FROM facts").fetchone()[0] or 0
         return {
-            'wiki_pages': self.count_wiki_pages(),
-            'facts': self.count_facts(),
-            'skills': self.count_skills(),
-            'sessions': self.count_sessions(),
-            'avg_trust': self.avg_trust(),
+            'total_facts': total_facts,
+            'global_facts': global_facts,
+            'project_facts': project_facts,
+            'total_skills': total_skills,
+            'global_skills': global_skills,
+            'project_skills': project_skills,
+            'total_wiki_pages': total_wiki,
+            'global_wiki_pages': global_wiki,
+            'project_wiki_pages': project_wiki,
+            'total_sessions': total_sessions,
+            'global_sessions': global_sessions,
+            'avg_trust': avg_trust,
             'evolution_score': ev_score,
             'evolution_trend': ev_trend,
+            'current_project': self.current_project_id,
         }
 
     # ── SQL Sandbox (LLM-as-DBA) ──
@@ -1483,12 +2139,13 @@ class NovaMemory:
         if first_word not in DBQ_ALLOWED_OPS:
             return f"Blocked: '{first_word}' not allowed. Use SELECT, INSERT, or UPDATE only."
 
-        upper_sql = stripped.upper()
+        # Remove string literals before keyword checking to avoid false positives
+        # (e.g., "CREATE" inside 'creating a skill' should not trigger the CREATE keyword block)
+        sql_no_strings = re.sub(r"'[^']*'", '', stripped)
+        upper_sql = sql_no_strings.upper()
         for kw in DBQ_BLOCKED_KEYWORDS:
-            # Check keyword appears as a standalone word (not inside a string literal)
             pattern = r'\b' + kw + r'\b'
             if re.search(pattern, upper_sql):
-                # Allow INSERT OR REPLACE (common SQLite idiom) — REPLACE alone is blocked
                 if kw == 'REPLACE' and 'INSERT OR REPLACE' in upper_sql:
                     continue
                 return f"Blocked: '{kw}' keyword found. Only SELECT/INSERT/UPDATE allowed."
@@ -1558,589 +2215,5 @@ class NovaMemory:
                 return {"status": "error", "msg": str(e)}
 
 
-# ── TwoTierMemory ──
-
-class TwoTierMemory:
-    """Two-tier memory: project-local + global.
-
-    Project-local DB: <project>/.nova/nova.db — project-specific knowledge
-    Global DB: ~/.nova/nova.db — cross-project transferable patterns
-
-    Queries hit both (local first for relevance), writes route by category.
-    """
-
-    def __init__(self, local_db_path: str, global_db_path: str):
-        self._local = NovaMemory(local_db_path)
-        self._global = NovaMemory(global_db_path)
-        self._knowledge_produced = False  # Fix #1: track if session produced knowledge
-
-    def _target(self, tier: str) -> NovaMemory:
-        return self._local if tier == 'local' else self._global
-
-    def _mark_knowledge_produced(self):
-        """Mark that this session produced knowledge artifacts (for smart crystallization)."""
-        self._knowledge_produced = True
-
-    # ── Wiki Operations ──
-
-    def wiki_add(self, slug: str, title: str, content: str,
-                 category: str = 'reference', tags: str = '',
-                 confidence: str = 'medium', sources: str = '',
-                 tier: str = 'auto') -> int:
-        self._mark_knowledge_produced()
-        target = self._target(_route_tier(category, tier))
-        return target.wiki_add(slug, title, content, category=category,
-                               tags=tags, confidence=confidence, sources=sources)
-
-    def wiki_ingest(self, title: str, content: str, tags: str,
-                    category: str = 'reference', confidence: str = 'medium',
-                    sources: str = '', tier: str = 'auto') -> int:
-        self._mark_knowledge_produced()
-        target = self._target(_route_tier(category, tier))
-        return target.wiki_ingest(title, content, tags, category=category,
-                                  confidence=confidence, sources=sources)
-
-    def wiki_read(self, slug: str, tier: str = 'local') -> Optional[Dict]:
-        result = self._local.wiki_read(slug)
-        if result:
-            return result
-        return self._global.wiki_read(slug)
-
-    def wiki_query(self, query: str, category: str = None,
-                   tags: str = None, limit: int = 10,
-                   tier: str = 'auto') -> List[Dict]:
-        results = []
-        seen_slugs = set()
-        if tier in ('auto', 'local'):
-            for r in self._local.wiki_query(query, category=category, tags=tags, limit=limit):
-                if r['slug'] not in seen_slugs:
-                    r['_tier'] = 'local'
-                    results.append(r)
-                    seen_slugs.add(r['slug'])
-        if tier in ('auto', 'global') and len(results) < limit:
-            for r in self._global.wiki_query(query, category=category, tags=tags, limit=limit):
-                if r['slug'] not in seen_slugs:
-                    r['_tier'] = 'global'
-                    results.append(r)
-                    seen_slugs.add(r['slug'])
-        return results[:limit]
-
-    def wiki_list(self, tier: str = 'auto') -> List[Dict]:
-        results = []
-        if tier in ('auto', 'local'):
-            for p in self._local.wiki_list():
-                p['_tier'] = 'local'
-                results.append(p)
-        if tier in ('auto', 'global'):
-            for p in self._global.wiki_list():
-                p['_tier'] = 'global'
-                results.append(p)
-        return results
-
-    def wiki_delete(self, slug: str, tier: str = 'local') -> bool:
-        target = self._target(tier)
-        return target.wiki_delete(slug)
-
-    def wiki_mark_quality(self, slug: str, quality: str, tier: str = 'local') -> bool:
-        """Update wiki page confidence based on RL feedback."""
-        target = self._target(tier)
-        return target.wiki_mark_quality(slug, quality)
-
-    def wiki_lint(self) -> List[str]:
-        issues = self._local.wiki_lint()
-        issues.extend(self._global.wiki_lint())
-        return issues
-
-    # ── Fact Operations ──
-
-    def fact_add(self, content: str, category: str = 'general',
-                 tags: str = '', trust_score: float = 0.5,
-                 tier: str = 'auto') -> int:
-        self._mark_knowledge_produced()
-        target = self._target(_route_tier(category, tier))
-        return target.fact_add(content, category=category, tags=tags, trust_score=trust_score)
-
-    def fact_search(self, query: str, category: str = None,
-                    min_trust: float = 0.3, limit: int = 10,
-                    tier: str = 'auto') -> List[Dict]:
-        results = []
-        seen_content = set()
-        if tier in ('auto', 'local'):
-            for f in self._local.fact_search(query, category=category, min_trust=min_trust, limit=limit):
-                if f['content'] not in seen_content:
-                    f['_tier'] = 'local'
-                    results.append(f)
-                    seen_content.add(f['content'])
-        if tier in ('auto', 'global') and len(results) < limit:
-            for f in self._global.fact_search(query, category=category, min_trust=min_trust, limit=limit):
-                if f['content'] not in seen_content:
-                    f['_tier'] = 'global'
-                    results.append(f)
-                    seen_content.add(f['content'])
-        return results[:limit]
-
-    def fact_mark_helpful(self, content: str, tier: str = 'auto') -> None:
-        for mem in (self._local, self._global):
-            try:
-                mem.fact_mark_helpful(content)
-            except:
-                pass
-
-    def fact_mark_helpful_by_id(self, fact_id: int) -> None:
-        """Mark a fact helpful by ID — tries both tiers since we may not know which tier it's in."""
-        for mem in (self._local, self._global):
-            try:
-                mem.fact_mark_helpful_by_id(fact_id)
-            except:
-                pass
-
-    def fact_mark_unhelpful(self, content: str, tier: str = 'auto') -> None:
-        for mem in (self._local, self._global):
-            try:
-                mem.fact_mark_unhelpful(content)
-            except:
-                pass
-
-    # ── Skill Operations ──
-
-    def skill_add(self, name: str, description: str, steps: list,
-                  tags: str = '', success_rate: float = 0.5,
-                  triggers: str = '', pitfalls: list = None,
-                  tier: str = 'global') -> int:
-        self._mark_knowledge_produced()
-        target = self._target(tier)
-        return target.skill_add(name, description, steps, tags=tags, success_rate=success_rate,
-                                triggers=triggers, pitfalls=pitfalls)
-
-    def skill_search(self, query: str, min_success: float = 0.3,
-                     limit: int = 5, tier: str = 'auto') -> List[Dict]:
-        results = []
-        seen_names = set()
-        if tier in ('auto', 'global'):
-            for s in self._global.skill_search(query, min_success=min_success, limit=limit):
-                if s['name'] not in seen_names:
-                    s['_tier'] = 'global'
-                    results.append(s)
-                    seen_names.add(s['name'])
-        if tier in ('auto', 'local') and len(results) < limit:
-            for s in self._local.skill_search(query, min_success=min_success, limit=limit):
-                if s['name'] not in seen_names:
-                    s['_tier'] = 'local'
-                    results.append(s)
-                    seen_names.add(s['name'])
-        return results[:limit]
-
-    def skill_update_success(self, name: str, success: bool) -> None:
-        for mem in (self._local, self._global):
-            try:
-                mem.skill_update_success(name, success)
-            except:
-                pass
-
-    def skill_improve(self, name: str, new_steps: list = None,
-                      new_pitfalls: list = None, new_triggers: str = None,
-                      tier: str = 'global') -> bool:
-        target = self._target(tier)
-        return target.skill_improve(name, new_steps=new_steps,
-                                    new_pitfalls=new_pitfalls, new_triggers=new_triggers)
-
-    def skill_match(self, query: str, limit: int = 2, min_success: float = 0.3) -> List[Dict]:
-        """Proactive skill matching — searches both tiers using SQL LIKE queries."""
-        results = []
-        seen_names = set()
-        # Global first (skills default to global tier)
-        for s in self._global.skill_match(query, limit=limit, min_success=min_success):
-            if s['name'] not in seen_names:
-                s['_tier'] = 'global'
-                results.append(s)
-                seen_names.add(s['name'])
-        if len(results) < limit:
-            for s in self._local.skill_match(query, limit=limit, min_success=min_success):
-                if s['name'] not in seen_names:
-                    s['_tier'] = 'local'
-                    results.append(s)
-                    seen_names.add(s['name'])
-        return results[:limit]
-
-    # ── Session Operations ──
-
-    def session_archive(self, task: str, summary: str, result: str) -> int:
-        return self._local.session_archive(task, summary, result,
-                                           had_knowledge=self._knowledge_produced)
-
-    def session_create(self, task: str) -> int:
-        return self._local.session_create(task)
-
-    def session_update(self, session_id: int, summary: str = '',
-                       result: str = '', had_knowledge: bool = False):
-        self._local.session_update(session_id, summary, result, had_knowledge)
-
-    def session_turn_add(self, session_id: int, turn_num: int, role: str,
-                         content: str = '', tool_name: str = '',
-                         tool_args: str = '{}', tool_result: str = '',
-                         thinking: str = '') -> int:
-        return self._local.session_turn_add(session_id, turn_num, role, content,
-                                            tool_name, tool_args, tool_result, thinking)
-
-    def session_turns_query(self, session_id: int, limit: int = None) -> List[Dict]:
-        return self._local.session_turns_query(session_id, limit)
-
-    def session_relevant_turns(self, task_prompt: str, max_sessions: int = 3,
-                               max_turns: int = 10) -> str:
-        return self._local.session_relevant_turns(task_prompt, max_sessions, max_turns)
-
-    def session_crystallize(self, session_id: int) -> Optional[int]:
-        return self._local.session_crystallize(session_id)
-
-    # ── Evolution Operations ──
-
-    def compute_evolution_loss(self, session_id: int, turns_used: int,
-                               max_turns: int, task_success: bool,
-                               accessed_fact_ids: list = None,
-                               accessed_skill_names: list = None,
-                               hindsight_hint: str = '') -> Dict:
-        return self._local.compute_evolution_loss(session_id, turns_used, max_turns,
-                                                   task_success, accessed_fact_ids,
-                                                   accessed_skill_names, hindsight_hint)
-
-    def evolution_log_add(self, session_id: int, loss_data: Dict) -> int:
-        return self._local.evolution_log_add(session_id, loss_data)
-
-    def apply_gradient(self, loss_data: Dict):
-        self._local.apply_gradient(loss_data)
-
-    def evolution_score(self) -> Tuple[float, float]:
-        return self._local.evolution_score()
-
-    # ── Pruning ──
-
-    def prune(self, max_age_days: int = 30) -> Dict:
-        """Prune old data and apply trust decay to both tiers."""
-        local_pruned = self._local.prune_old_sessions(max_age_days)
-        global_pruned = self._global.prune_old_sessions(max_age_days)
-        local_decayed = self._local.decay_low_trust_facts(0.2)
-        global_decayed = self._global.decay_low_trust_facts(0.2)
-        local_time_decay = self._local.apply_time_decay()
-        global_time_decay = self._global.apply_time_decay()
-        return {
-            'local_sessions_pruned': local_pruned,
-            'global_sessions_pruned': global_pruned,
-            'local_facts_decayed': local_decayed,
-            'global_facts_decayed': global_decayed,
-            'local_time_decay': local_time_decay,
-            'global_time_decay': global_time_decay,
-        }
-
-    # ── Context Builder (using query helpers — Fix #7) ──
-
-    def build_context_prompt(self) -> str:
-        """Build compact context — meta rules + catalog, not full dumps.
-
-        The agent has db_query/fact_search/wiki_query for retrieval.
-        Context injection only provides: (1) behavioral rules, (2) what's available to query.
-        """
-        prompt = ""
-
-        # L0 — Meta Rules (always inject — behavioral constraints must always apply)
-        meta = self._global.wiki_read('meta-rules')
-        if not meta:
-            meta = self._local.wiki_read('meta-rules')
-        if meta:
-            prompt += f"\n[L0 — Meta Rules]\n{meta['content']}\n"
-
-        # Catalog — what knowledge is available (not the knowledge itself)
-        ls = self._local.stats()
-        gs = self._global.stats()
-
-        # Category breakdown for routing hints
-        local_cats = self._local._conn.execute(
-            "SELECT category, COUNT(*) as cnt FROM facts GROUP BY category ORDER BY cnt DESC"
-        ).fetchall()
-        global_cats = self._global._conn.execute(
-            "SELECT category, COUNT(*) as cnt FROM facts GROUP BY category ORDER BY cnt DESC"
-        ).fetchall()
-
-        prompt += "\n[Knowledge Catalog]\n"
-        prompt += f"  Facts: {ls['facts']} local + {gs['facts']} global\n"
-        if local_cats:
-            prompt += f"  Local categories: {', '.join(f'{r[0]}({r[1]})' for r in local_cats[:5])}\n"
-        if global_cats:
-            prompt += f"  Global categories: {', '.join(f'{r[0]}({r[1]})' for r in global_cats[:5])}\n"
-        prompt += f"  Wiki: {ls['wiki_pages']} local + {gs['wiki_pages']} global pages\n"
-        prompt += f"  Skills: {ls['skills']} local + {gs['skills']} global SOPs\n"
-
-        # Top 3 highest-trust facts — proven reliable, worth always showing
-        local_top = self._local.get_high_trust_facts(min_trust=0.7, limit=3)
-        global_top = self._global.get_high_trust_facts(min_trust=0.7, limit=3)
-        if local_top or global_top:
-            prompt += "\n[Proven Facts (trust > 0.7)]\n"
-            for f in local_top:
-                prompt += f"  [local] {f['content']}\n"
-            for f in global_top:
-                prompt += f"  [global] {f['content']}\n"
-
-        # Evolution status — RL direction for next session
-        ev_score, ev_trend = self._local.evolution_score()
-        if ev_score != 0.5:  # Only show if we have data
-            trend_arrow = '↑' if ev_trend > 0 else '↓' if ev_trend < 0 else '—'
-            prompt += f"\n[Evolution Status] score={ev_score:.2f} trend={trend_arrow}\n"
-            if ev_trend < 0:
-                targets_row = self._local._conn.execute(
-                    "SELECT improvement_targets FROM evolution_log ORDER BY created_at DESC LIMIT 1"
-                ).fetchone()
-                if targets_row:
-                    tgt_list = json.loads(targets_row[0])
-                    if tgt_list:
-                        prompt += f"  Priority targets: {', '.join(tgt_list)}\n"
-
-        # Retrieval hints
-        prompt += "\n[Retrieval]\n"
-        prompt += "  - db_query SELECT for precise, structured retrieval\n"
-        prompt += "  - wiki_query for fuzzy keyword search across wiki pages\n"
-        prompt += "  - fact_search for trust-ranked fact lookup\n"
-        prompt += "  - db_schema to inspect available tables/columns\n"
-
-        prompt += f"\ncwd = {os.path.dirname(self._local.db_path)}\n"
-
-        return prompt
-
-    # ── Backward-compatible API ──
-
-    def proactive_recall(self, task_prompt: str, max_facts: int = 5) -> str:
-        """Automatically recall relevant knowledge at task start.
-
-        Extracts keywords from the user's task prompt, searches local+global facts
-        individually per keyword (avoids AND-matching failures), merges results.
-        """
-        # Extract meaningful keywords (skip common stopwords)
-        stopwords = {'the','a','an','is','are','was','were','be','been','being',
-                     'have','has','had','do','does','did','will','would','could',
-                     'should','may','might','shall','can','need','to','of','in',
-                     'for','on','with','at','by','from','as','into','through',
-                     'during','before','after','above','below','between','out',
-                     'off','over','under','again','further','then','once','here',
-                     'there','when','where','why','how','all','both','each','few',
-                     'more','most','other','some','such','no','not','only','own',
-                     'same','so','than','too','very','just','because','but','and',
-                     'or','if','while','about','up','it','its','this','that','these',
-                     'those','i','me','my','we','our','you','your','he','him','his',
-                     'she','her','they','them','their','what','which','who','whom',
-                     'build','create','write','make','solve','fix','use','run','show',
-                     'help','tell','give','find','get','set','put','add','remove'}
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', task_prompt.lower())
-        keywords = [w for w in words if w not in stopwords]
-        if not keywords:
-            return ""
-
-        # Search each keyword individually and merge (avoids AND-matching failures in FTS5)
-        results = []
-        seen = set()
-
-        for kw in keywords[:5]:  # Top 5 keywords
-            # Local first
-            for f in self._local.fact_search(kw, min_trust=0.4, limit=3):
-                key = f['content']
-                if key not in seen:
-                    f['_tier'] = 'local'
-                    results.append(f)
-                    seen.add(key)
-            # Global supplement
-            for f in self._global.fact_search(kw, min_trust=0.4, limit=2):
-                key = f['content']
-                if key not in seen:
-                    f['_tier'] = 'global'
-                    results.append(f)
-                    seen.add(key)
-            if len(results) >= max_facts:
-                break
-
-        results = results[:max_facts]
-
-        # Also check wiki for relevant pages (top 2)
-        wiki_hints = []
-        for kw in keywords[:2]:
-            for p in self._local.wiki_query(kw, limit=1):
-                if p['category'] != 'session-log' and p['title'] not in {h.split("'")[1] for h in wiki_hints if "'" in h}:
-                    wiki_hints.append(f"  wiki page '{p['title']}' [{p['category']}] — may be relevant")
-
-        if not results and not wiki_hints:
-            return ""
-
-        prompt = "\n[Recalled Knowledge — relevant to your task]\n"
-        for f in results:
-            tier = f.get('_tier', 'local')
-            prompt += f"  [{tier}] {f['content']}\n"
-        for hint in wiki_hints:
-            prompt += hint + "\n"
-
-        return prompt
-
-    # ── Backward-compatible API ──
-
-    def read_layer(self, layer: str) -> str:
-        return self._local.read_layer(layer)
-
-    def write_layer(self, layer: str, content: str, mode='overwrite'):
-        self._local.write_layer(layer, content, mode=mode)
-
-    def archive_session(self, summary: str, task: str, result: str):
-        self._local.archive_session(summary, task, result, had_knowledge=self._knowledge_produced)
-
-    def close(self):
-        self._local.close()
-        self._global.close()
-
-    # ── Stats ──
-
-    def stats(self) -> Dict:
-        ls = self._local.stats()
-        gs = self._global.stats()
-        return {
-            'local_wiki_pages': ls['wiki_pages'],
-            'local_facts': ls['facts'],
-            'local_skills': ls['skills'],
-            'local_sessions': ls['sessions'],
-            'local_avg_trust': ls['avg_trust'],
-            'global_wiki_pages': gs['wiki_pages'],
-            'global_facts': gs['facts'],
-            'global_skills': gs['skills'],
-            'global_sessions': gs['sessions'],
-            'global_avg_trust': gs['avg_trust'],
-            'evolution_score': ls['evolution_score'],
-            'evolution_trend': ls['evolution_trend'],
-        }
-
-    # ── SQL Sandbox (LLM-as-DBA) ──
-
-    def get_schema_info(self, tier: str = 'auto') -> Dict:
-        """Return schema info for both tiers."""
-        result = {}
-        if tier in ('auto', 'local'):
-            local_info = self._local.get_schema_info()
-            local_info['tier'] = 'local'
-            result['local'] = local_info
-        if tier in ('auto', 'global'):
-            global_info = self._global.get_schema_info()
-            global_info['tier'] = 'global'
-            result['global'] = global_info
-        return result
-
-    def safe_query(self, sql: str, tier: str = 'auto') -> Dict:
-        """Execute sandboxed SQL across tiers. SELECT hits both, INSERT/UPDATE routes by tier."""
-        stripped = sql.strip().upper()
-        is_select = stripped.startswith('SELECT')
-
-        if is_select:
-            # SELECT: hit both tiers (local first), merge and dedup results
-            results = []
-            seen_content = set()  # Dedup by content/slug/name (without tier distinction)
-
-            if tier in ('auto', 'local'):
-                local_result = self._local.safe_query(sql)
-                if local_result['status'] == 'success':
-                    for row in local_result.get('rows', []):
-                        dedup_key = row.get('slug') or row.get('content') or row.get('name') or str(row.get('id'))
-                        if dedup_key not in seen_content:
-                            row['_tier'] = 'local'
-                            results.append(row)
-                            seen_content.add(dedup_key)
-
-            if tier in ('auto', 'global'):
-                global_result = self._global.safe_query(sql)
-                if global_result['status'] == 'success':
-                    for row in global_result.get('rows', []):
-                        dedup_key = row.get('slug') or row.get('content') or row.get('name') or str(row.get('id'))
-                        if dedup_key not in seen_content:
-                            row['_tier'] = 'global'
-                            results.append(row)
-                            seen_content.add(dedup_key)
-
-            # Enforce limits: keep local-first order but ensure global unique items survive truncation
-            # Strategy: take local rows first, then append global-only rows, truncate to DBQ_MAX_ROWS
-            if len(results) > DBQ_MAX_ROWS:
-                local_rows = [r for r in results if r.get('_tier') == 'local']
-                global_rows = [r for r in results if r.get('_tier') == 'global']
-                # Keep up to DBQ_MAX_ROWS-5 local rows, then fill with global unique rows
-                local_keep = min(len(local_rows), DBQ_MAX_ROWS - min(5, len(global_rows)))
-                global_keep = min(len(global_rows), DBQ_MAX_ROWS - local_keep)
-                results = local_rows[:local_keep] + global_rows[:global_keep]
-                truncated = True
-            else:
-                truncated = False
-
-            # Enforce char limit
-            total_chars = len(json.dumps(results, ensure_ascii=False))
-            if total_chars > DBQ_MAX_CHARS:
-                results = results[:10]
-                truncated = True
-
-            return {
-                "status": "success",
-                "rows": results,
-                "row_count": len(results),
-                "truncated": truncated,
-            }
-        else:
-            # INSERT/UPDATE: validate first, then route to appropriate tier
-            # Validate against sandbox rules before routing
-            err = self._local._validate_sql(sql)
-            if err:
-                return {"status": "error", "msg": err}
-
-            if tier in ('local', 'global'):
-                target = self._target(tier)
-                return target.safe_query(sql)
-            else:
-                # Auto-route: parse category from SQL to determine tier
-                # Extract table name from INSERT INTO or UPDATE
-                table_match = re.search(r'(?:INTO|UPDATE)\s+(\w+)', sql, re.IGNORECASE)
-                if not table_match:
-                    return {"status": "error", "msg": "Cannot determine target table for auto-routing."}
-
-                table = table_match.group(1).lower()
-                if table == 'sessions':
-                    # Sessions always go local
-                    return self._local.safe_query(sql)
-
-                # Try to extract category from SQL for routing
-                # Handles both forms: category = 'pattern' (UPDATE) and positional VALUES
-                category = None
-
-                # Form 1: category = 'value' (UPDATE SET, or INSERT with explicit column=value)
-                category_match = re.search(r"category\s*=\s*'(\w+)'", sql, re.IGNORECASE)
-                if category_match:
-                    category = category_match.group(1)
-
-                # Form 2: positional INSERT VALUES — find category column position in table
-                if not category and table in ('facts', 'wiki_pages'):
-                    # Get column list from INSERT statement
-                    cols_match = re.search(r'\(([^)]+)\)\s*VALUES', sql, re.IGNORECASE)
-                    if cols_match:
-                        cols = [c.strip().strip('"\'') for c in cols_match.group(1).split(',')]
-                        cat_idx = None
-                        for i, c in enumerate(cols):
-                            if c.lower() == 'category':
-                                cat_idx = i
-                                break
-                        if cat_idx is not None:
-                            # Extract the value at that position from VALUES clause
-                            vals_match = re.search(r'VALUES\s*\(([^)]+)\)', sql, re.IGNORECASE)
-                            if vals_match:
-                                vals = [v.strip().strip('"\'') for v in vals_match.group(1).split(',')]
-                                if cat_idx < len(vals):
-                                    category = vals[cat_idx]
-
-                category = category or 'general'
-                target_tier = _route_tier(category, 'auto')
-                target = self._target(target_tier)
-                result = target.safe_query(sql)
-
-                # Mark knowledge produced if INSERT succeeds
-                if result['status'] == 'success':
-                    self._mark_knowledge_produced()
-
-                return result
-
-
 # ── Legacy alias ──
-MemoryEngine = TwoTierMemory
+MemoryEngine = NovaMemory

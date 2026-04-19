@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from nova.memory.engine import NovaMemory, TwoTierMemory, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3
+from nova.memory.engine import NovaMemory, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3
 
 
 @pytest.fixture
@@ -20,15 +20,8 @@ def global_db(tmp_path):
 
 
 @pytest.fixture
-def local_memory(local_db):
+def memory(local_db):
     mem = NovaMemory(local_db)
-    yield mem
-    mem.close()
-
-
-@pytest.fixture
-def two_tier(local_db, global_db):
-    mem = TwoTierMemory(local_db, global_db)
     yield mem
     mem.close()
 
@@ -130,12 +123,12 @@ class TestSessionTurnsSchema:
         assert 'session_turns' in tables_after
         assert int(version) >= 3
 
-    def test_db_query_can_select_session_turns(self, local_memory):
-        sid = local_memory.session_create("test task")
-        local_memory.session_turn_add(sid, 1, 'assistant', content='hello',
+    def test_db_query_can_select_session_turns(self, memory):
+        sid = memory.session_create("test task")
+        memory.session_turn_add(sid, 1, 'assistant', content='hello',
                                        tool_name='code_run', tool_args='{"script":"ls"}',
                                        tool_result='file1.txt')
-        result = local_memory.safe_query(
+        result = memory.safe_query(
             "SELECT tool_name, tool_args FROM session_turns WHERE session_id=%d" % sid
         )
         assert result['status'] == 'success'
@@ -147,128 +140,102 @@ class TestSessionTurnsSchema:
 
 
 class TestSessionCreateUpdate:
-    def test_session_create_returns_id(self, local_memory):
-        sid = local_memory.session_create("deploy flask app")
+    def test_session_create_returns_id(self, memory):
+        sid = memory.session_create("deploy flask app")
         assert sid > 0
-        session = local_memory._conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+        session = memory._conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
         assert session['task'] == "deploy flask app"
         assert session['summary'] == ''
         assert session['result'] == ''
 
-    def test_session_update_fills_summary_result(self, local_memory):
-        sid = local_memory.session_create("test task")
-        local_memory.session_update(sid, summary="deployed successfully", result="server running",
+    def test_session_update_fills_summary_result(self, memory):
+        sid = memory.session_create("test task")
+        memory.session_update(sid, summary="deployed successfully", result="server running",
                                     had_knowledge=True)
-        session = local_memory._conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+        session = memory._conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
         assert session['summary'] == "deployed successfully"
         assert session['result'] == "server running"
         assert session['had_knowledge_output'] == 1
 
-    def test_two_tier_session_create(self, two_tier):
-        sid = two_tier.session_create("global task")
-        assert sid > 0
-
-
-# ── session_turn_add / session_turns_query ──
-
-
-class TestSessionTurnOps:
-    def test_add_and_query_turns(self, local_memory):
-        sid = local_memory.session_create("debug error")
-        local_memory.session_turn_add(sid, 1, 'assistant', content='analyzing error',
+    def test_session_create_returns_id(self, memory):
+        sid = memory.session_create("debug error")
+        memory.session_turn_add(sid, 1, 'assistant', content='analyzing error',
                                        tool_name='code_run', tool_args='{"script":"cat logs"}',
                                        tool_result='ERROR: permission denied')
-        local_memory.session_turn_add(sid, 2, 'assistant', content='fixed it',
+        memory.session_turn_add(sid, 2, 'assistant', content='fixed it',
                                        tool_name='file_write', tool_args='{"path":"fix.py"}',
                                        tool_result='written successfully')
-        turns = local_memory.session_turns_query(sid)
+        turns = memory.session_turns_query(sid)
         assert len(turns) == 2
         assert turns[0]['turn_num'] == 1
         assert turns[0]['tool_name'] == 'code_run'
         assert turns[1]['tool_name'] == 'file_write'
 
-    def test_query_with_limit(self, local_memory):
-        sid = local_memory.session_create("test")
+    def test_query_with_limit(self, memory):
+        sid = memory.session_create("test")
         for i in range(5):
-            local_memory.session_turn_add(sid, i + 1, 'assistant', tool_name='tool_%d' % i)
-        turns = local_memory.session_turns_query(sid, limit=2)
+            memory.session_turn_add(sid, i + 1, 'assistant', tool_name='tool_%d' % i)
+        turns = memory.session_turns_query(sid, limit=2)
         assert len(turns) == 2
 
-    def test_truncation_on_insert(self, local_memory):
-        sid = local_memory.session_create("test")
+    def test_truncation_on_insert(self, memory):
+        sid = memory.session_create("test")
         long_content = "x" * 5000
         long_result = "y" * 5000
-        local_memory.session_turn_add(sid, 1, 'assistant', content=long_content,
+        memory.session_turn_add(sid, 1, 'assistant', content=long_content,
                                        tool_result=long_result)
-        turn = local_memory.session_turns_query(sid)[0]
+        turn = memory.session_turns_query(sid)[0]
         assert len(turn['content']) <= 2000
         assert len(turn['tool_result']) <= 2000
 
-    def test_tool_args_dict_truncation(self, local_memory):
-        sid = local_memory.session_create("test")
+    def test_tool_args_dict_truncation(self, memory):
+        sid = memory.session_create("test")
         long_args = {"script": "z" * 5000}
-        local_memory.session_turn_add(sid, 1, 'assistant', tool_args=long_args)
-        turn = local_memory.session_turns_query(sid)[0]
+        memory.session_turn_add(sid, 1, 'assistant', tool_args=long_args)
+        turn = memory.session_turns_query(sid)[0]
         assert len(turn['tool_args']) <= 2000
-
-    def test_two_tier_turn_add_routes_to_local(self, two_tier):
-        sid = two_tier.session_create("test")
-        tid = two_tier.session_turn_add(sid, 1, 'assistant', content='hello',
-                                        tool_name='code_run')
-        assert tid > 0
-        turns = two_tier.session_turns_query(sid)
-        assert len(turns) == 1
 
 
 # ── session_relevant_turns ──
 
 
 class TestSessionRelevantTurns:
-    def test_find_relevant_session_turns(self, local_memory):
+    def test_find_relevant_session_turns(self, memory):
         # Create a past session about deploying flask
-        sid = local_memory.session_create("deploy flask app to server")
-        local_memory.session_turn_add(sid, 1, 'assistant', tool_name='code_run',
+        sid = memory.session_create("deploy flask app to server")
+        memory.session_turn_add(sid, 1, 'assistant', tool_name='code_run',
                                        tool_args='{"script":"ssh server"}',
                                        tool_result='connected')
-        local_memory.session_update(sid, summary="deployed", result="success")
+        memory.session_update(sid, summary="deployed", result="success")
 
         # Query with flask keywords
-        context = local_memory.session_relevant_turns("deploy flask app")
+        context = memory.session_relevant_turns("deploy flask app")
         assert "flask" in context.lower() or "deploy" in context.lower()
         assert "code_run" in context
 
-    def test_no_relevant_sessions_returns_empty(self, local_memory):
-        context = local_memory.session_relevant_turns("nonexistent_xyz_task")
+    def test_no_relevant_sessions_returns_empty(self, memory):
+        context = memory.session_relevant_turns("nonexistent_xyz_task")
         assert context == ""
-
-    def test_two_tier_relevant_turns(self, two_tier):
-        sid = two_tier.session_create("deploy nginx server")
-        two_tier.session_turn_add(sid, 1, 'assistant', tool_name='code_run',
-                                  tool_args='{"script":"nginx -t"}',
-                                  tool_result='syntax ok')
-        two_tier.session_update(sid, summary="deployed nginx", result="running")
-        context = two_tier.session_relevant_turns("deploy nginx")
-        assert context != ""
 
 
 # ── Pruning cascades ──
 
 
 class TestSessionTurnsPruning:
-    def test_prune_cascades_to_turns(self, local_memory):
-        sid = local_memory.session_create("old task")
-        local_memory.session_turn_add(sid, 1, 'assistant', tool_name='code_run',
+    def test_prune_cascades_to_turns(self, memory):
+        sid = memory.session_create("old task")
+        memory.session_turn_add(sid, 1, 'assistant', tool_name='code_run',
                                        tool_result='old result')
         # Verify turn exists
-        turns = local_memory.session_turns_query(sid)
+        turns = memory.session_turns_query(sid)
         assert len(turns) == 1
 
         # Prune with 0 days — deletes everything older than today
         # (session was just created, so use negative to force prune)
         # Instead, manually delete to verify cascade logic
-        local_memory._conn.execute("DELETE FROM session_turns WHERE session_id=?", (sid,))
-        local_memory._conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
-        local_memory._conn.commit()
+        memory._conn.execute("DELETE FROM session_turns WHERE session_id=?", (sid,))
+        memory._conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+        memory._conn.commit()
 
-        turns_after = local_memory.session_turns_query(sid)
+        turns_after = memory.session_turns_query(sid)
         assert len(turns_after) == 0

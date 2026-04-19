@@ -6,16 +6,15 @@ import tempfile
 import pytest
 
 from nova.context.system_prompt import build_system_prompt
-from nova.memory.engine import TwoTierMemory
+from nova.memory.engine import NovaMemory
 
 
 @pytest.fixture
 def prompt_memory(tmp_path):
-    """TwoTierMemory for prompt building tests."""
-    local_db = os.path.join(str(tmp_path), '.nova', 'local.db')
-    global_db = os.path.join(str(tmp_path), '.nova', 'global.db')
+    """NovaMemory for prompt building tests."""
+    db_path = os.path.join(str(tmp_path), '.nova', 'nova.db')
     os.makedirs(os.path.join(str(tmp_path), '.nova'), exist_ok=True)
-    mem = TwoTierMemory(local_db, global_db)
+    mem = NovaMemory(db_path)
     yield mem
     mem.close()
 
@@ -28,7 +27,7 @@ class TestBuildSystemPrompt:
 
     def test_includes_memory_system(self, prompt_memory):
         prompt = build_system_prompt(prompt_memory)
-        assert "Memory System" in prompt or "two-tier" in prompt.lower()
+        assert "Memory System" in prompt or "unified" in prompt.lower() or "project" in prompt.lower()
 
     def test_includes_tool_reference(self, prompt_memory):
         prompt = build_system_prompt(prompt_memory)

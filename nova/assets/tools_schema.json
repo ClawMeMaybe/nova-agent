@@ -202,7 +202,7 @@
   },
   {
     "name": "wiki_ingest",
-    "description": "Ingest knowledge into the wiki — creates a new page or merges into existing one (append strategy, never replaces). This is the compounding mechanism: knowledge grows across sessions. Use cross-references like [[page-name]] to link pages.",
+    "description": "Ingest knowledge into the wiki — creates a new page or merges into existing one (append strategy, never replaces). Stored in global scope by default, or in the current project scope if a project is selected. This is the compounding mechanism: knowledge grows across sessions. Use cross-references like [[page-name]] to link pages.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -229,12 +229,6 @@
           "enum": ["high", "medium", "low"],
           "description": "Confidence level of this knowledge",
           "default": "medium"
-        },
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "description": "Where to store: local (project-specific), global (cross-project transferable), or auto (routed by category — environment/debugging/session-log→local, pattern/convention/decision→global)",
-          "default": "auto"
         }
       },
       "required": ["title", "content", "tags"]
@@ -242,7 +236,7 @@
   },
   {
     "name": "wiki_query",
-    "description": "Search wiki pages by keywords, tags, and category. Returns matching pages with relevance snippets. Searches both local (project-specific) and global (cross-project) tiers by default.",
+    "description": "Search wiki pages by keywords, tags, and category. Returns matching pages with relevance snippets. Searches global scope and current project scope.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -258,12 +252,6 @@
         "tags": {
           "type": "string",
           "description": "Filter by comma-separated tags"
-        },
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "description": "Which tier to search: local (project only), global (cross-project), auto (both, local first)",
-          "default": "auto"
         }
       },
       "required": ["query"]
@@ -271,7 +259,7 @@
   },
   {
     "name": "fact_add",
-    "description": "Add a verified fact to the knowledge base. Facts have trust scores that evolve with use: helpful facts gain trust (+0.05), unhelpful facts lose trust (-0.10). Use for quick, structured knowledge.",
+    "description": "Add a verified fact to the knowledge base. Stored in global scope by default, or in the current project scope if a project is selected. Facts have trust scores that evolve with use: helpful facts gain trust (+0.05), unhelpful facts lose trust (-0.10). Use for quick, structured knowledge.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -286,12 +274,6 @@
         "tags": {
           "type": "string",
           "description": "Comma-separated tags"
-        },
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "description": "Where to store: local (project-specific), global (cross-project), auto (routed by category)",
-          "default": "auto"
         }
       },
       "required": ["content"]
@@ -299,7 +281,7 @@
   },
   {
     "name": "fact_search",
-    "description": "Search facts by keywords with trust-based ranking. Searches both local and global tiers by default (local first for relevance).",
+    "description": "Search facts by keywords with trust-based ranking. Searches global scope and current project scope.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -315,15 +297,32 @@
           "type": "number",
           "description": "Minimum trust score threshold (0.0-1.0)",
           "default": 0.3
-        },
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "description": "Which tier to search: local (project only), global (cross-project), auto (both, local first)",
-          "default": "auto"
         }
       },
       "required": ["query"]
+    }
+  },
+  {
+    "name": "fact_feedback",
+    "description": "Mark a fact as helpful or unhelpful. Only works on facts you accessed this session via fact_search or db_query. Helpful feedback bumps trust (+0.05), unhelpful drops trust (-0.10). Unhelpful requires a reason (min 10 chars). Feedback events are recorded for evolution loss integration.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "The fact ID to provide feedback on (must be from fact_search/db_query results this session)"
+        },
+        "helpful": {
+          "type": "boolean",
+          "description": "Whether the fact was helpful (true) or unhelpful (false)",
+          "default": true
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the fact was helpful/unhelpful. Required (min 10 chars) when helpful=false, optional when helpful=true."
+        }
+      },
+      "required": ["id", "helpful"]
     }
   },
   {
@@ -335,12 +334,6 @@
         "sql": {
           "type": "string",
           "description": "SQL query to execute (SELECT, INSERT, or UPDATE only)"
-        },
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "default": "auto",
-          "description": "Which DB tier to query: local (project-specific), global (cross-project), auto (both, local first)"
         }
       },
       "required": ["sql"]
@@ -351,14 +344,7 @@
     "description": "Inspect your knowledge database schema — see available tables, columns, types, and row counts. Use this to understand what you can query before writing SQL with db_query.",
     "parameters": {
       "type": "object",
-      "properties": {
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "default": "auto",
-          "description": "Which DB tier schema to inspect"
-        }
-      }
+      "properties": {}
     }
   },
   {
@@ -367,12 +353,6 @@
     "parameters": {
       "type": "object",
       "properties": {
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global"],
-          "default": "local",
-          "description": "Which tier's wiki pages to export"
-        },
         "output_dir": {
           "type": "string",
           "description": "Directory to write markdown files (default: .nova/wiki/)"
@@ -413,7 +393,7 @@
   },
   {
     "name": "skill_add",
-    "description": "Crystallize a repeatable workflow into a skill. Skills are structured SOPs that improve over time through usage tracking and version evolution. Write skills when: (1) you completed a multi-step task that you'd repeat, (2) you discovered a workflow pattern worth preserving, (3) you learned pitfalls that prevent common mistakes. Format: numbered imperative steps, triggers for when to activate, pitfalls for what to avoid. Last step should always be a verification/check step.",
+    "description": "Crystallize a repeatable workflow into a skill. Stored in global scope by default, or in the current project scope if a project is selected. Skills are structured SOPs that improve over time through usage tracking and version evolution. Write skills when: (1) you completed a multi-step task that you'd repeat, (2) you discovered a workflow pattern worth preserving, (3) you learned pitfalls that prevent common mistakes. Format: numbered imperative steps, triggers for when to activate, pitfalls for what to avoid. Last step should always be a verification/check step.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -442,20 +422,37 @@
         "tags": {
           "type": "string",
           "description": "Comma-separated tags for categorization"
-        },
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "default": "global",
-          "description": "Where to store: local (project-specific), global (cross-project transferable), or auto (routed by tags)"
         }
       },
       "required": ["name", "description", "steps", "triggers"]
     }
   },
   {
+    "name": "skill_feedback",
+    "description": "Mark a skill as helpful or unhelpful. Only works on skills you accessed this session via skill_search. Helpful feedback increases success rate, unhelpful decreases it. Unhelpful requires a reason (min 10 chars). Feedback events are recorded for evolution loss integration.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The skill name to provide feedback on (must be from skill_search results this session)"
+        },
+        "helpful": {
+          "type": "boolean",
+          "description": "Whether the skill was helpful (true) or unhelpful (false)",
+          "default": true
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the skill was helpful/unhelpful. Required (min 10 chars) when helpful=false, optional when helpful=true."
+        }
+      },
+      "required": ["name", "helpful"]
+    }
+  },
+  {
     "name": "skill_search",
-    "description": "Search for crystallized skills/SOPs by keywords. Returns skills with steps, triggers, pitfalls, and success rates. Use before starting complex tasks to leverage proven workflows. Skills improve over time — high success_rate skills are battle-tested. Searches both local and global tiers by default.",
+    "description": "Search for crystallized skills/SOPs by keywords. Returns skills with steps, triggers, pitfalls, and success rates. Use before starting complex tasks to leverage proven workflows. Skills improve over time — high success_rate skills are battle-tested. Searches global scope and current project scope.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -467,15 +464,200 @@
           "type": "number",
           "description": "Minimum success rate threshold (0.0-1.0)",
           "default": 0.3
-        },
-        "tier": {
-          "type": "string",
-          "enum": ["local", "global", "auto"],
-          "default": "global",
-          "description": "Which tier to search: local (project only), global (cross-project), auto (both)"
         }
       },
       "required": ["query"]
+    }
+  },
+  {
+    "name": "link_add",
+    "description": "Create an explicit relationship between two knowledge items. Links enable cascade feedback — marking a fact unhelpful flags linked skills for review. Use link types: depends_on (skill needs this fact), related_to (connected topics), derived_from (knowledge came from this source), contradicts (conflicting knowledge).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": ["fact", "skill", "wiki"],
+          "description": "Type of the source knowledge item"
+        },
+        "source_id": {
+          "type": "integer",
+          "description": "ID of the source item"
+        },
+        "source_name": {
+          "type": "string",
+          "description": "Name of the source item (for skills/wiki)"
+        },
+        "target_type": {
+          "type": "string",
+          "enum": ["fact", "skill", "wiki"],
+          "description": "Type of the target knowledge item"
+        },
+        "target_id": {
+          "type": "integer",
+          "description": "ID of the target item"
+        },
+        "target_name": {
+          "type": "string",
+          "description": "Name of the target item (for skills/wiki)"
+        },
+        "link_type": {
+          "type": "string",
+          "enum": ["depends_on", "related_to", "derived_from", "contradicts"],
+          "default": "depends_on",
+          "description": "Relationship type between the items"
+        }
+      },
+      "required": ["source_type", "target_type"]
+    }
+  },
+  {
+    "name": "link_search",
+    "description": "Search knowledge links by optional filters. Find dependencies, related items, and connections between facts, skills, and wiki pages. Use to discover what knowledge items depend on each other.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": ["fact", "skill", "wiki"],
+          "description": "Filter by source type"
+        },
+        "source_id": {
+          "type": "integer",
+          "description": "Filter by source ID"
+        },
+        "target_type": {
+          "type": "string",
+          "enum": ["fact", "skill", "wiki"],
+          "description": "Filter by target type"
+        },
+        "target_id": {
+          "type": "integer",
+          "description": "Filter by target ID"
+        },
+        "link_type": {
+          "type": "string",
+          "enum": ["depends_on", "related_to", "derived_from", "contradicts"],
+          "description": "Filter by link type"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "cluster_search",
+    "description": "Search for composed knowledge bundles — facts, skills, and wiki pages grouped by topic tag. Returns structured bundles with relevance scores based on tag overlap. Use when you need a comprehensive knowledge package for a task type. Searches global scope and current project scope.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search keywords — matched against tags of facts, skills, and wiki pages"
+        },
+        "min_relevance": {
+          "type": "number",
+          "default": 0.3,
+          "description": "Minimum relevance score threshold (0.0-1.0)"
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "project_create",
+    "description": "Create a new project scope for knowledge isolation. Projects allow you to compartmentalize knowledge — facts, skills, and wiki pages scoped to a project are only visible when that project is selected. Use project_select to switch scope.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Project name (must be unique)"
+        },
+        "description": {
+          "type": "string",
+          "description": "Project description",
+          "default": ""
+        }
+      },
+      "required": ["name"]
+    }
+  },
+  {
+    "name": "project_select",
+    "description": "Select a project scope for subsequent knowledge operations. When a project is selected, reads include global + project-scoped knowledge, and writes default to project scope. Pass project_id=null to switch back to global scope.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project ID to select, or null to switch to global scope"
+        }
+      },
+      "required": ["project_id"]
+    }
+  },
+  {
+    "name": "project_list",
+    "description": "List all projects with their IDs, names, descriptions, and creation dates.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "project_info",
+    "description": "Get detailed info about a project including scoped knowledge counts (facts, skills, wiki pages).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project ID to inspect"
+        }
+      },
+      "required": ["project_id"]
+    }
+  },
+  {
+    "name": "fact_promote",
+    "description": "Promote a project-scoped fact to global scope, making it accessible across all projects.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "The fact ID to promote to global scope"
+        }
+      },
+      "required": ["id"]
+    }
+  },
+  {
+    "name": "skill_promote",
+    "description": "Promote a project-scoped skill to global scope, making it accessible across all projects.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The skill name to promote to global scope"
+        }
+      },
+      "required": ["name"]
+    }
+  },
+  {
+    "name": "wiki_promote",
+    "description": "Promote a project-scoped wiki page to global scope, making it accessible across all projects.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "slug": {
+          "type": "string",
+          "description": "The wiki page slug to promote to global scope"
+        }
+      },
+      "required": ["slug"]
     }
   }
 ]

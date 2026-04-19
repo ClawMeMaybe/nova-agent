@@ -21,7 +21,7 @@ import collections
 
 from nova.agent_loop import BaseHandler, StepOutcome
 from nova.events import AgentEvent
-from nova.memory.engine import TwoTierMemory
+from nova.memory.engine import NovaMemory
 
 logger = logging.getLogger("nova")
 
@@ -180,10 +180,8 @@ def file_patch(path, old_content, new_content):
 def get_global_memory():
     """Get memory context for injection into prompts."""
     try:
-        project_root = os.environ.get('NOVA_PROJECT_ROOT', os.getcwd())
-        local_db = os.path.join(project_root, '.nova', 'nova.db')
         global_db = os.path.join(os.path.expanduser('~'), '.nova', 'nova.db')
-        engine = TwoTierMemory(local_db, global_db)
+        engine = NovaMemory(global_db)
         try:
             ctx = engine.build_context_prompt()
         finally:
@@ -214,6 +212,27 @@ class NovaHandler(BaseHandler):
         if not path:
             return ""
         return os.path.abspath(os.path.join(self.cwd, path))
+
+    def _resolve_link_name(self, item_type, item_id, current_name):
+        """Auto-fill link name from DB when ID provided but name empty."""
+        if current_name or item_id is None:
+            return current_name
+        try:
+            if item_type == 'fact':
+                row = self.memory._conn.execute("SELECT content FROM facts WHERE id=?", (item_id,)).fetchone()
+                if row:
+                    return row['content'][:60]
+            elif item_type == 'skill':
+                row = self.memory._conn.execute("SELECT name FROM skills WHERE id=?", (item_id,)).fetchone()
+                if row:
+                    return row['name']
+            elif item_type == 'wiki':
+                row = self.memory._conn.execute("SELECT title FROM wiki_pages WHERE id=?", (item_id,)).fetchone()
+                if row:
+                    return row['title']
+        except Exception:
+            pass
+        return current_name
 
     def _get_anchor_prompt(self, skip=False):
         if skip:
@@ -353,7 +372,6 @@ class NovaHandler(BaseHandler):
         tags = args.get("tags", "")
         category = args.get("category", "reference")
         confidence = args.get("confidence", "medium")
-        tier = args.get("tier", "auto")
 
         if not content:
             return StepOutcome({"status": "error", "msg": "No content provided"}, next_prompt="\n")
@@ -361,8 +379,7 @@ class NovaHandler(BaseHandler):
         try:
             page_id = self.memory.wiki_ingest(
                 title, content, tags,
-                category=category, confidence=confidence,
-                tier=tier
+                category=category, confidence=confidence
             )
             result = {
                 "status": "success",
@@ -380,13 +397,12 @@ class NovaHandler(BaseHandler):
         query = args.get("query", "")
         category = args.get("category")
         tags = args.get("tags")
-        tier = args.get("tier", "auto")
 
         if not query:
             return StepOutcome({"status": "error", "msg": "Query required"}, next_prompt="\n")
 
         try:
-            pages = self.memory.wiki_query(query, category=category, tags=tags, tier=tier)
+            pages = self.memory.wiki_query(query, category=category, tags=tags)
             if not pages:
                 result = {"status": "no_results", "msg": f"No wiki pages matching '{query}'"}
             else:
@@ -415,13 +431,12 @@ class NovaHandler(BaseHandler):
         content = args.get("content", "")
         category = args.get("category", "general")
         tags = args.get("tags", "")
-        tier = args.get("tier", "auto")
 
         if not content:
             return StepOutcome({"status": "error", "msg": "Fact content required"}, next_prompt="\n")
 
         try:
-            fact_id = self.memory.fact_add(content, category=category, tags=tags, tier=tier)
+            fact_id = self.memory.fact_add(content, category=category, tags=tags)
             result = {
                 "status": "success",
                 "msg": f"Fact added (id={fact_id}). Trust score starts at 0.5, evolves with use.",
@@ -438,13 +453,12 @@ class NovaHandler(BaseHandler):
         query = args.get("query", "")
         category = args.get("category")
         min_trust = args.get("min_trust", 0.3)
-        tier = args.get("tier", "auto")
 
         if not query:
             return StepOutcome({"status": "error", "msg": "Query required"}, next_prompt="\n")
 
         try:
-            facts = self.memory.fact_search(query, category=category, min_trust=min_trust, tier=tier)
+            facts = self.memory.fact_search(query, category=category, min_trust=min_trust)
             # Track accessed fact IDs for trust feedback
             for f in facts:
                 if 'id' in f:
@@ -466,18 +480,178 @@ class NovaHandler(BaseHandler):
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
 
+    def do_fact_feedback(self, args, response):
+        """Mark a fact as helpful or unhelpful — per-turn feedback for trust evolution."""
+        fact_id = args.get("id")
+        helpful = args.get("helpful", True)
+        reason = args.get("reason", "")
+
+        if fact_id is None:
+            return StepOutcome({"status": "error", "msg": "Fact ID required"}, next_prompt="\n")
+
+        # Accessed-only validation
+        if fact_id not in self._accessed_fact_ids:
+            return StepOutcome({"status": "error", "msg": "Cannot provide feedback on knowledge not accessed this session"}, next_prompt="\n")
+
+        # Reason validation for unhelpful feedback
+        if not helpful and len(reason.strip()) < 10:
+            return StepOutcome({"status": "error", "msg": "Reason must be at least 10 characters when marking knowledge as unhelpful"}, next_prompt="\n")
+
+        try:
+            event_id = self.memory.feedback_event_add(
+                'fact', fact_id, '', helpful, reason,
+                self._session_id, self.current_turn
+            )
+            result = {
+                "status": "success",
+                "msg": f"Fact {fact_id} marked as {'helpful' if helpful else 'unhelpful'}. Feedback event recorded (id={event_id}).",
+                "event_id": event_id,
+                "helpful": helpful,
+            }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_skill_feedback(self, args, response):
+        """Mark a skill as helpful or unhelpful — per-turn feedback for success rate evolution."""
+        name = args.get("name", "")
+        helpful = args.get("helpful", True)
+        reason = args.get("reason", "")
+
+        if not name:
+            return StepOutcome({"status": "error", "msg": "Skill name required"}, next_prompt="\n")
+
+        # Accessed-only validation
+        if name not in self._accessed_skill_names:
+            return StepOutcome({"status": "error", "msg": "Cannot provide feedback on knowledge not accessed this session"}, next_prompt="\n")
+
+        # Reason validation for unhelpful feedback
+        if not helpful and len(reason.strip()) < 10:
+            return StepOutcome({"status": "error", "msg": "Reason must be at least 10 characters when marking knowledge as unhelpful"}, next_prompt="\n")
+
+        try:
+            event_id = self.memory.feedback_event_add(
+                'skill', None, name, helpful, reason,
+                self._session_id, self.current_turn
+            )
+            result = {
+                "status": "success",
+                "msg": f"Skill '{name}' marked as {'helpful' if helpful else 'unhelpful'}. Feedback event recorded (id={event_id}).",
+                "event_id": event_id,
+                "helpful": helpful,
+            }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    # ── Knowledge Link Tools ──
+
+    def do_link_add(self, args, response):
+        """Create a link between two knowledge items."""
+        source_type = args.get("source_type", "")
+        source_id = args.get("source_id")
+        source_name = args.get("source_name", "")
+        target_type = args.get("target_type", "")
+        target_id = args.get("target_id")
+        target_name = args.get("target_name", "")
+        link_type = args.get("link_type", "depends_on")
+
+        if not source_type or not target_type:
+            return StepOutcome({"status": "error", "msg": "Both source_type and target_type required"}, next_prompt="\n")
+        if source_id is None and not source_name:
+            return StepOutcome({"status": "error", "msg": "source_id or source_name required"}, next_prompt="\n")
+        if target_id is None and not target_name:
+            return StepOutcome({"status": "error", "msg": "target_id or target_name required"}, next_prompt="\n")
+
+        # Auto-fill names from DB when IDs provided but names empty
+        source_name = self._resolve_link_name(source_type, source_id, source_name)
+        target_name = self._resolve_link_name(target_type, target_id, target_name)
+
+        try:
+            link_id = self.memory.link_add(
+                source_type, source_id, source_name,
+                target_type, target_id, target_name, link_type
+            )
+            result = {
+                "status": "success",
+                "msg": f"Link created: {source_type}:{source_name}→{target_type}:{target_name} ({link_type}). id={link_id}",
+                "link_id": link_id,
+            }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_link_search(self, args, response):
+        """Search knowledge links by optional filters."""
+        try:
+            links = self.memory.link_search(
+                source_type=args.get("source_type"),
+                source_id=args.get("source_id"),
+                target_type=args.get("target_type"),
+                target_id=args.get("target_id"),
+                link_type=args.get("link_type"),
+            )
+            if not links:
+                result = {"status": "no_results", "msg": "No matching links"}
+            else:
+                summaries = []
+                for lk in links:
+                    summaries.append(f"{lk['source_type']}:{lk.get('source_name', lk.get('source_id'))} → {lk['target_type']}:{lk.get('target_name', lk.get('target_id'))} [{lk['link_type']}]")
+                result = {"status": "success", "msg": f"Found {len(links)} links", "links": summaries}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_cluster_search(self, args, response):
+        """Search for composed knowledge bundles by topic."""
+        query = args.get("query", "")
+        min_relevance = args.get("min_relevance", 0.3)
+
+        if not query:
+            return StepOutcome({"status": "error", "msg": "Query required"}, next_prompt="\n")
+
+        try:
+            bundles = self.memory.cluster_search(query, min_relevance=min_relevance)
+            if not bundles:
+                result = {"status": "no_results", "msg": f"No knowledge clusters matching '{query}'"}
+            else:
+                summaries = []
+                for b in bundles:
+                    s = f"**[{b['topic_tag']}]** (relevance: {b['relevance_score']})\n"
+                    s += f"  Facts: {len(b['facts'])}, Skills: {len(b['skills'])}, Wiki: {len(b['wiki_pages'])}\n"
+                    for f in b['facts'][:3]:
+                        s += f"  - fact: {f['content'][:80]} (trust: {f['trust_score']:.2f})\n"
+                    for sk in b['skills'][:2]:
+                        s += f"  - skill: {sk['name']} (success: {sk['success_rate']:.2f})\n"
+                    for p in b['wiki_pages'][:1]:
+                        s += f"  - wiki: {p['title']}\n"
+                    summaries.append(s)
+                result = {"status": "success", "msg": f"Found {len(bundles)} knowledge bundles", "bundles": summaries}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
     # ── SQL Sandbox Tools (LLM-as-DBA) ──
 
     def do_db_query(self, args, response):
         """Execute sandboxed SQL against the knowledge database."""
         sql = args.get("sql", "")
-        tier = args.get("tier", "auto")
 
         if not sql:
             return StepOutcome({"status": "error", "msg": "SQL query required"}, next_prompt="\n")
 
         try:
-            result = self.memory.safe_query(sql, tier=tier)
+            result = self.memory.safe_query(sql)
             # Track accessed fact IDs for trust feedback on SELECT
             if result.get('status') == 'success' and 'rows' in result and 'facts' in sql.lower():
                 for row in result.get('rows', []):
@@ -491,10 +665,9 @@ class NovaHandler(BaseHandler):
 
     def do_db_schema(self, args, response):
         """Inspect the knowledge database schema."""
-        tier = args.get("tier", "auto")
 
         try:
-            result = self.memory.get_schema_info(tier=tier)
+            result = self.memory.get_schema_info()
         except Exception as e:
             result = {"status": "error", "msg": str(e)}
 
@@ -503,14 +676,13 @@ class NovaHandler(BaseHandler):
 
     def do_wiki_export(self, args, response):
         """Export wiki pages to markdown files for human browsing."""
-        tier = args.get("tier", "local")
         output_dir = args.get("output_dir") or os.path.join(self.cwd, ".nova", "wiki")
 
         try:
-            pages = self.memory.wiki_list(tier=tier)
+            pages = self.memory.wiki_list()
             exported = []
             for page in pages:
-                full = self.memory.wiki_read(page['slug'], tier=tier)
+                full = self.memory.wiki_read(page['slug'])
                 if full:
                     md_path = os.path.join(output_dir, f"{full['slug']}.md")
                     content = (
@@ -602,7 +774,6 @@ class NovaHandler(BaseHandler):
         triggers = args.get("triggers", "")
         pitfalls = args.get("pitfalls", [])
         tags = args.get("tags", "")
-        tier = args.get("tier", "global")
 
         if not name or not steps or not triggers:
             return StepOutcome({"status": "error", "msg": "name, steps, and triggers are required"}, next_prompt="\n")
@@ -610,8 +781,7 @@ class NovaHandler(BaseHandler):
         try:
             skill_id = self.memory.skill_add(
                 name, description, steps,
-                tags=tags, triggers=triggers, pitfalls=pitfalls,
-                tier=tier
+                tags=tags, triggers=triggers, pitfalls=pitfalls
             )
             result = {
                 "status": "success",
@@ -628,13 +798,12 @@ class NovaHandler(BaseHandler):
         """Search for crystallized skills/SOPs by keywords."""
         query = args.get("query", "")
         min_success = args.get("min_success", 0.3)
-        tier = args.get("tier", "global")
 
         if not query:
             return StepOutcome({"status": "error", "msg": "Query required"}, next_prompt="\n")
 
         try:
-            skills = self.memory.skill_search(query, min_success=min_success, tier=tier)
+            skills = self.memory.skill_search(query, min_success=min_success)
             # Track accessed skill names for success feedback
             for s in skills:
                 if 'name' in s:
@@ -644,8 +813,8 @@ class NovaHandler(BaseHandler):
             else:
                 summaries = []
                 for s in skills:
-                    tier_label = s.get('_tier', tier)
-                    summary = f"**{s['name']}** (v{s.get('version', 1)}, success: {s['success_rate']:.0%}, used {s['usage_count']}x) [{tier_label}]\n"
+                    scope_label = 'project' if s.get('project_id') else 'global'
+                    summary = f"**{s['name']}** (v{s.get('version', 1)}, success: {s['success_rate']:.0%}, used {s['usage_count']}x) [{scope_label}]\n"
                     summary += f"  Description: {s['description']}\n"
                     summary += f"  Triggers: {s.get('triggers', '')}\n"
                     summary += f"  Steps:\n"
@@ -662,6 +831,154 @@ class NovaHandler(BaseHandler):
                     "msg": f"Found {len(skills)} skills",
                     "skills": summaries,
                 }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    # ── Project Management Tools ──
+
+    def do_project_create(self, args, response):
+        """Create a new project scope for knowledge isolation."""
+        name = args.get("name", "")
+        description = args.get("description", "")
+
+        if not name:
+            return StepOutcome({"status": "error", "msg": "Project name required"}, next_prompt="\n")
+
+        try:
+            project_id = self.memory.project_create(name, description)
+            result = {
+                "status": "success",
+                "msg": f"Project '{name}' created (id={project_id}). Use project_select to switch scope.",
+                "project_id": project_id,
+            }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_project_select(self, args, response):
+        """Select a project scope — all subsequent reads/writes use this project_id."""
+        project_id = args.get("project_id")
+
+        try:
+            self.memory.project_select(project_id)
+            self.parent.current_project_id = project_id
+            if project_id:
+                info = self.memory.project_info(project_id)
+                result = {
+                    "status": "success",
+                    "msg": f"Switched to project '{info['name']}' (id={project_id}). All knowledge operations now scoped to this project.",
+                    "project_id": project_id,
+                    "project_info": info,
+                }
+            else:
+                result = {
+                    "status": "success",
+                    "msg": "Switched to global scope. All knowledge operations now operate on global knowledge.",
+                    "project_id": None,
+                }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_project_list(self, args, response):
+        """List all projects."""
+        try:
+            projects = self.memory.project_list()
+            if not projects:
+                result = {"status": "no_results", "msg": "No projects yet. Use project_create to add one."}
+            else:
+                summaries = []
+                for p in projects:
+                    s = f"  {p['id']}: {p['name']} — {p['description']} (created: {p['created_at'][:10]})"
+                    summaries.append(s)
+                result = {"status": "success", "msg": f"{len(projects)} projects", "projects": summaries}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_project_info(self, args, response):
+        """Get detailed info about a project including scoped knowledge counts."""
+        project_id = args.get("project_id", "")
+
+        if not project_id:
+            return StepOutcome({"status": "error", "msg": "project_id required"}, next_prompt="\n")
+
+        try:
+            info = self.memory.project_info(project_id)
+            if not info:
+                result = {"status": "error", "msg": f"Project {project_id} not found"}
+            else:
+                result = {
+                    "status": "success",
+                    "msg": f"Project '{info['name']}'",
+                    "info": info,
+                }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_fact_promote(self, args, response):
+        """Promote a project-scoped fact to global scope."""
+        fact_id = args.get("id")
+
+        if fact_id is None:
+            return StepOutcome({"status": "error", "msg": "Fact ID required"}, next_prompt="\n")
+
+        try:
+            success = self.memory.fact_promote(fact_id)
+            if success:
+                result = {"status": "success", "msg": f"Fact {fact_id} promoted to global scope. Now accessible across all projects."}
+            else:
+                result = {"status": "error", "msg": f"Fact {fact_id} not found"}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_skill_promote(self, args, response):
+        """Promote a project-scoped skill to global scope."""
+        name = args.get("name", "")
+
+        if not name:
+            return StepOutcome({"status": "error", "msg": "Skill name required"}, next_prompt="\n")
+
+        try:
+            success = self.memory.skill_promote(name)
+            if success:
+                result = {"status": "success", "msg": f"Skill '{name}' promoted to global scope. Now accessible across all projects."}
+            else:
+                result = {"status": "error", "msg": f"Skill '{name}' not found"}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_wiki_promote(self, args, response):
+        """Promote a project-scoped wiki page to global scope."""
+        slug = args.get("slug", "")
+
+        if not slug:
+            return StepOutcome({"status": "error", "msg": "Wiki page slug required"}, next_prompt="\n")
+
+        try:
+            success = self.memory.wiki_promote(slug)
+            if success:
+                result = {"status": "success", "msg": f"Wiki page '{slug}' promoted to global scope. Now accessible across all projects."}
+            else:
+                result = {"status": "error", "msg": f"Wiki page '{slug}' not found"}
         except Exception as e:
             result = {"status": "error", "msg": str(e)}
 
@@ -706,8 +1023,7 @@ class NovaHandler(BaseHandler):
         # Trust decay on session end (lightweight maintenance)
         if exit_reason:
             try:
-                self.memory._local.apply_time_decay()
-                self.memory._global.apply_time_decay()
+                self.memory.apply_time_decay()
             except:
                 pass
 
@@ -717,7 +1033,7 @@ class NovaHandler(BaseHandler):
             data = exit_reason.get('data', '')
             if not isinstance(data, str):
                 data = str(data)[:500]
-            had_knowledge = self.memory._knowledge_produced
+            had_knowledge = len(self._accessed_fact_ids) > 0 or len(self._accessed_skill_names) > 0
             if self._session_id:
                 self.memory.session_update(
                     self._session_id, summary=task_desc, result=data,

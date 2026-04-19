@@ -1,9 +1,9 @@
-<!-- Generated: 2026-04-17 | Updated: 2026-04-17 -->
+<!-- Generated: 2026-04-17 | Updated: 2026-04-19 -->
 
 # nova-agent
 
 ## Purpose
-Self-evolving AI agent with compounding knowledge — minimal loop, atomic tools, two-tier SQL+Wiki memory. Synthesizes the best ideas from Hermes (trust scoring), GenericAgent (~100-line loop), and OpenClaw (multi-platform messaging), plus Karpathy's LLM Wiki concept for persistent knowledge that compounds across sessions.
+Self-evolving AI agent with compounding knowledge — minimal loop, atomic tools, unified SQLite memory with project scoping. Synthesizes the best ideas from Hermes (trust scoring), GenericAgent (~100-line loop), and OpenClaw (multi-platform messaging), plus Karpathy's LLM Wiki concept for persistent knowledge that compounds across sessions.
 
 ## Key Files
 
@@ -34,11 +34,13 @@ Self-evolving AI agent with compounding knowledge — minimal loop, atomic tools
 ### Testing Requirements
 - All tests use pytest with temp directories for DB isolation
 - Test fixtures in `tests/conftest.py` provide temp DB paths and memory instances
+- `memory` fixture creates NovaMemory at temp db; `memory_with_project` creates + selects a project
 - LLM tests mock the client; memory tests use real SQLite
 
 ### Common Patterns
 - Entry points defined in pyproject.toml `[project.scripts]` — each channel has its own CLI
 - Optional dependencies grouped by channel: `[telegram]`, `[discord]`, `[wechat]`, `[feishu]`, `[qq]`, `[dingtalk]`, `[web]`, `[gateway]`, `[all]`
+- Unified memory: single DB at `~/.nova/nova.db`, project scoping via project_id columns
 
 ## Dependencies
 

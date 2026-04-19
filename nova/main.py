@@ -1,6 +1,6 @@
 """Nova Agent — self-evolving AI agent main orchestrator.
 
-Two-tier memory: project-local (<cwd>/.nova/nova.db) + global (~/.nova/nova.db).
+Unified memory: single SQLite DB (~/.nova/nova.db) with project_id scoping.
 """
 
 import json
@@ -17,7 +17,7 @@ from nova.agent_loop import BaseHandler, StepOutcome, agent_runner_loop
 from nova.events import EventBus
 from nova.llmcore import LLMClient, create_client_from_config
 from nova.tools.handler import NovaHandler, smart_format, get_global_memory
-from nova.memory.engine import TwoTierMemory
+from nova.memory.engine import NovaMemory
 from nova.context.system_prompt import build_system_prompt
 from nova.cron import NovaCron
 from nova.autonomous import AutonomousMonitor
@@ -44,20 +44,18 @@ def load_tool_schema():
 
 
 class NovaAgent:
-    """The main agent class — orchestrates LLM, handler, and two-tier memory."""
+    """The main agent class — orchestrates LLM, handler, and unified memory."""
 
     def __init__(self, project_root=None):
         self.client = create_client_from_config()
         self.tools_schema = load_tool_schema()
 
-        # Two-tier memory paths
-        project_root = project_root or _resolve_project_root()
-        local_db = os.path.join(project_root, '.nova', 'nova.db')
+        # Unified memory: single DB with project_id scoping
         global_db = os.path.join(HOME_DIR, '.nova', 'nova.db')
-
-        self.memory = TwoTierMemory(local_db, global_db)
+        self.memory = NovaMemory(global_db)
+        self.current_project_id = None
         self.lock = threading.Lock()
-        self.task_dir = os.path.join(project_root, '.nova', 'temp')
+        self.task_dir = os.path.join(HOME_DIR, '.nova', 'temp')
         os.makedirs(self.task_dir, exist_ok=True)
         self.history = []
         self.task_queue = queue.Queue()
@@ -106,7 +104,7 @@ class NovaAgent:
             # Create session record at task start for detailed turn tracking
             session_id = self.memory.session_create(raw_query)
 
-            sys_prompt = build_system_prompt(self.memory)
+            sys_prompt = build_system_prompt(self.memory, raw_query)
 
             # Proactive recall: inject relevant prior knowledge into the task
             recall_context = self.memory.proactive_recall(raw_query)
@@ -119,8 +117,8 @@ class NovaAgent:
             if skill_matches:
                 skill_context = "\n[Relevant Skills — proven workflows for this task]\n"
                 for sk in skill_matches:
-                    tier = sk.get('_tier', 'global')
-                    skill_context += f"  **{sk['name']}** (v{sk.get('version', 1)}, success: {sk['success_rate']:.0%}) [{tier}]\n"
+                    scope = 'global' if sk.get('project_id') is None else 'project'
+                    skill_context += f"  **{sk['name']}** (v{sk.get('version', 1)}, success: {sk['success_rate']:.0%}) [{scope}]\n"
                     skill_context += f"    Triggers: {sk.get('triggers', '')}\n"
                     for step in sk['steps'][:4]:
                         skill_context += f"    {step}\n"
@@ -164,14 +162,17 @@ class NovaAgent:
                 else:
                     full_resp = str(result_data) if result_data else ''
 
-                # Use handler history for rich context
-                handler_summary = handler.history_info
-                if handler_summary:
-                    full_resp = '\n'.join(handler_summary) + '\n\n' + full_resp
+                # Save handler history for cross-session context (not in display output)
+                self.history = handler.history_info
 
                 display_queue.put({'next': full_resp, 'source': source})
                 display_queue.put({'done': full_resp, 'source': source})
-                self.history = handler.history_info
+
+                # Update skill success rates based on session outcome
+                session_success = result.get('result', '') not in ('MAX_TURNS_EXCEEDED', 'EXITED')
+                matched_skills = self.memory.skill_match(raw_query)
+                for sk in matched_skills:
+                    self.memory.skill_update_success(sk['name'], success=session_success)
 
             except Exception as e:
                 display_queue.put({'done': f'Error: {e}', 'source': source})
@@ -194,9 +195,9 @@ class NovaAgent:
         self.autonomous.start()
 
         stats = self.memory.stats()
-        print(f"Nova Agent v{__version__} — Self-evolving AI assistant (Two-tier SQL+Wiki memory)")
-        print(f"Local: {stats['local_wiki_pages']} wiki | {stats['local_facts']} facts | {stats['local_skills']} skills | {stats['local_sessions']} sessions")
-        print(f"Global: {stats['global_wiki_pages']} wiki | {stats['global_facts']} facts | {stats['global_skills']} skills | {stats['global_sessions']} sessions")
+        print(f"Nova Agent v{__version__} — Self-evolving AI assistant (Unified SQL+Wiki memory)")
+        print(f"Total: {stats['total_wiki_pages']} wiki | {stats['total_facts']} facts | {stats['total_skills']} skills | {stats['total_sessions']} sessions")
+        print(f"Global: {stats['global_wiki_pages']} wiki | {stats['global_facts']} facts | {stats['global_skills']} skills")
         print("Type your message, /cron for scheduled jobs, /todo for tasks, or /quit to exit.\n")
 
         while True:
@@ -212,14 +213,15 @@ class NovaAgent:
                 break
             if q == '/stats':
                 stats = self.memory.stats()
-                print(f"[Local] Wiki: {stats['local_wiki_pages']} | Facts: {stats['local_facts']} | Skills: {stats['local_skills']} | Sessions: {stats['local_sessions']} | Trust: {stats['local_avg_trust']:.2f}")
-                print(f"[Global] Wiki: {stats['global_wiki_pages']} | Facts: {stats['global_facts']} | Skills: {stats['global_skills']} | Sessions: {stats['global_sessions']} | Trust: {stats['global_avg_trust']:.2f}")
+                print(f"[Stats] Wiki: {stats['total_wiki_pages']} | Facts: {stats['total_facts']} | Skills: {stats['total_skills']} | Sessions: {stats['total_sessions']} | Trust: {stats['avg_trust']:.2f}")
+                if stats['current_project']:
+                    print(f"  Project: {stats['current_project']} — {stats['project_facts']} facts, {stats['project_skills']} skills")
                 continue
             if q == '/wiki':
                 pages = self.memory.wiki_list()
                 for p in pages:
-                    tier = p.get('_tier', '?')
-                    print(f"  [{tier}] [{p['category']}] {p['title']} (tags: {p['tags']})")
+                    scope = 'global' if p.get('project_id') is None else 'project'
+                    print(f"  [{scope}] [{p['category']}] {p['title']} (tags: {p['tags']})")
                 continue
             if q == '/cron':
                 from nova.cron.jobs import list_jobs
@@ -232,7 +234,7 @@ class NovaAgent:
                         print(f"  {j['id']}: {j['name']} ({j['schedule']['kind']}) next={j['next_run_at']} runs={j['completed_count']} {status}")
                 continue
             if q == '/todo':
-                todo = self.memory.wiki_read('autonomous-todo', tier='global')
+                todo = self.memory.wiki_read('autonomous-todo')
                 if todo and todo.get('content'):
                     print("Autonomous TODO:")
                     print(todo['content'])
@@ -244,7 +246,7 @@ class NovaAgent:
                 trend_arrow = '↑' if trend > 0 else '↓' if trend < 0 else '—'
                 print(f"Evolution Score: {score:.2f} (trend: {trend_arrow})")
                 try:
-                    recent = self.memory._local._conn.execute(
+                    recent = self.memory._conn.execute(
                         "SELECT loss_task, loss_efficiency, loss_recurrence, loss_knowledge_quality, "
                         "loss_total, evolution_score, created_at "
                         "FROM evolution_log ORDER BY created_at DESC LIMIT 5"

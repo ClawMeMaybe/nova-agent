@@ -4,7 +4,7 @@ import os
 import tempfile
 import pytest
 
-from nova.memory.engine import NovaMemory, TwoTierMemory
+from nova.memory.engine import NovaMemory
 
 
 @pytest.fixture
@@ -17,37 +17,17 @@ def tmp_project_dir():
 
 
 @pytest.fixture
-def local_db(tmp_project_dir):
-    """Path to a temp local database."""
-    return os.path.join(tmp_project_dir, '.nova', 'nova.db')
-
-
-@pytest.fixture
-def global_db():
-    """Path to a temp global database."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield os.path.join(tmpdir, '.nova', 'nova.db')
-
-
-@pytest.fixture
-def local_memory(local_db):
-    """NovaMemory instance pointing to a temp local db."""
-    mem = NovaMemory(local_db)
+def memory(tmp_project_dir):
+    """NovaMemory instance pointing to a temp db."""
+    db_path = os.path.join(tmp_project_dir, '.nova', 'nova.db')
+    mem = NovaMemory(db_path)
     yield mem
     mem.close()
 
 
 @pytest.fixture
-def global_memory(global_db):
-    """NovaMemory instance pointing to a temp global db."""
-    mem = NovaMemory(global_db)
-    yield mem
-    mem.close()
-
-
-@pytest.fixture
-def two_tier_memory(local_db, global_db):
-    """TwoTierMemory with both temp dbs."""
-    mem = TwoTierMemory(local_db, global_db)
-    yield mem
-    mem.close()
+def memory_with_project(memory):
+    """NovaMemory with a project created and selected."""
+    project_id = memory.project_create("test-project", "Test project description")
+    memory.project_select(project_id)
+    yield memory, project_id

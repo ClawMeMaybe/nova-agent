@@ -2,10 +2,10 @@
 
 import os
 import time
-from nova.memory.engine import TwoTierMemory
+from nova.memory.engine import NovaMemory
 
 
-def build_system_prompt(memory: TwoTierMemory) -> str:
+def build_system_prompt(memory: NovaMemory, task_prompt: str = '') -> str:
     """Build the complete system prompt for the agent."""
 
     prompt = """# Role: Self-Evolving AI Problem Solver
@@ -22,11 +22,14 @@ Before each tool call, reason inside <thinking>: current phase, whether last res
 - **Crystallize after success**: after completing complex tasks, save what you learned — use wiki_ingest for rich knowledge, fact_add for quick facts, or db_query INSERT for structured data.
 
 ## Memory System
-You have a two-tier SQLite knowledge base that persists across sessions:
-- **Local** (<project>/.nova/nova.db): project-specific paths, configs, debugging notes, sessions
-- **Global** (~/.nova/nova.db): cross-project patterns, conventions, decisions, reusable skills
+You have a unified SQLite knowledge base that persists across sessions:
+- **Global** (~/.nova/nova.db): all knowledge stored in a single database
+- **Project scope**: when a project is selected, knowledge can be scoped to that project
+- Knowledge in global scope (no project selected) is accessible across all projects
+- Use project_create/project_select to manage project-scoped knowledge
+- Use fact_promote/skill_promote/wiki_promote to move project-scoped knowledge to global scope
 
-Tables: wiki_pages (rich knowledge pages), facts (atomic verified facts with trust scores), skills (SOPs with success rates), sessions (task archives), evolution_log (loss function tracking self-evolution).
+Tables: wiki_pages (rich knowledge pages), facts (atomic verified facts with trust scores), skills (SOPs with success rates), sessions (task archives), projects (knowledge scopes), evolution_log (loss function tracking self-evolution).
 
 Evolution score measures overall performance trend: 1 - avg(loss) over recent sessions. Check /evolve for details. Gradient feedback is proportional to loss magnitude — big failures drive big updates. When declining, autonomous mode prioritizes skills flagged by the gradient and uses hindsight hints from recent failures to add pitfalls.
 
@@ -37,7 +40,7 @@ Use whichever tool fits the moment:
 - **start_long_term_update** — to prompt yourself to distill experience after a complex task
 - **db_query INSERT** — for precise, full-control inserts: `INSERT INTO facts (content, category, tags) VALUES (...)`
 
-Category → tier routing (auto): environment/debugging/session-log → local, pattern/convention/decision → global.
+Category → scope (auto): use project_select to scope knowledge to a project, or leave in global scope for cross-project reuse.
 
 ### How to Remember Skills
 Use skill_add to crystallize repeatable workflows:
@@ -55,17 +58,23 @@ The system injects a **knowledge catalog** and any **proven facts** (trust > 0.7
   - `SELECT w.title, f.content FROM wiki_pages w JOIN facts f ON w.category = f.category`
   - `SELECT st.tool_name, st.tool_args, st.tool_result FROM session_turns st WHERE st.session_id=?` — review past session detail
   - Full rows, not snippets. Use this when you know what structure you need.
+- **cluster_search(query)** — composed knowledge bundles. Returns facts+skills+wiki pages grouped by topic tag with relevance scores. Use this when you need a comprehensive knowledge package for a task type (e.g., "Flask deployment" returns related facts, deployment skills, and architecture wiki pages together).
+- **link_add(source_type, source_id, target_type, target_id, link_type)** — create an explicit relationship between knowledge items. Link types: depends_on (skill needs this fact), related_to (connected topics), derived_from (knowledge came from this source), contradicts (conflicting knowledge). Links enable cascade: marking a fact unhelpful flags all skills that depend on it for review.
+- **link_search(source_type, source_id, target_type, target_id, link_type)** — find relationships between knowledge items. Use to discover dependencies and connections.
 - **wiki_query(query)** — fuzzy keyword search (FTS5-backed). Good when you don't know exact terms.
 - **fact_search(query)** — trust-ranked fact search. Good for quick lookups.
 - **db_schema** — inspect available tables and columns before writing SQL.
+- **fact_feedback(id, helpful, reason)** — mark a fact as helpful (+0.05 trust) or unhelpful (-0.10 trust). Only works on facts you accessed this session via fact_search or db_query. Unhelpful requires a reason (min 10 chars). Unhelpful feedback also flags linked skills for review (cascade).
+- **skill_feedback(name, helpful, reason)** — mark a skill as helpful or unhelpful. Only works on skills you accessed this session via skill_search. Unhelpful requires a reason (min 10 chars).
 
-Relevant prior knowledge is auto-injected at task start — you don't need to explicitly search before beginning a task.
+Relevant prior knowledge is auto-injected at task start — the system pushes a task-relevant knowledge bundle (cluster_search) when possible, with a catalog fallback. You don't need to explicitly search before beginning a task.
 
 ### Trust Scores
 Facts have trust scores (0.0-1.0) that evolve:
 - Facts you retrieve gain a small trust bump (+0.01 per retrieval)
-- Facts that help complete a task gain trust (+0.05) — the system tracks which facts you accessed during a task
-- Facts you mark unhelpful lose trust (-0.10)
+- Facts that help complete a task gain trust (+0.05) — use fact_feedback to explicitly signal this
+- Facts you mark unhelpful lose trust (-0.10) — use fact_feedback with a reason
+- Time decay: environment facts decay fast (6%/month), patterns decay slowly (1%/month)
 - Time decay: environment facts decay fast (6%/month), patterns decay slowly (1%/month)
 - Frequently-used facts (retrieval_count ≥ 5) resist decay
 - Facts below trust 0.15 are auto-deleted
@@ -110,21 +119,19 @@ Never repeat an action that failed without gathering new information first.
 """
 
     # Inject memory context
-    prompt += memory.build_context_prompt()
+    prompt += memory.build_context_prompt(task_prompt)
 
     # Inject timestamp
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a %H:%M')}\n"
 
-    # Inject schema summary (compact — the LLM uses db_schema for details)
-    schema = memory.get_schema_info()
+    # Inject memory stats (unified format)
+    stats = memory.stats()
     prompt += "\n[Memory Stats]\n"
-    for tier_name in ('local', 'global'):
-        if tier_name in schema:
-            info = schema[tier_name]
-            counts = info.get('row_counts', {})
-            prompt += f"  {tier_name}: "
-            parts = [f"{t}={counts.get(t, 0)}" for t in ('wiki_pages', 'facts', 'skills', 'sessions')]
-            prompt += ", ".join(parts) + "\n"
+    prompt += f"  Total: {stats['total_wiki_pages']} wiki, {stats['total_facts']} facts, {stats['total_skills']} skills, {stats['total_sessions']} sessions\n"
+    prompt += f"  Global: {stats['global_wiki_pages']} wiki, {stats['global_facts']} facts, {stats['global_skills']} skills\n"
+    if stats['current_project']:
+        prompt += f"  Project: {stats['current_project']} — {stats['project_facts']} facts, {stats['project_skills']} skills, {stats['project_wiki_pages']} wiki\n"
+    prompt += f"  Avg trust: {stats['avg_trust']:.2f}, Evolution score: {stats['evolution_score']:.2f}\n"
 
     # Inject L0 meta rules
     meta = memory.read_layer('L0_meta_rules.txt')

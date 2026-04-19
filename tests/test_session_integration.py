@@ -7,22 +7,11 @@ This test exercises the full pipeline without a live LLM:
 4. Verify self-evolvement: skill refinement using session detail
 """
 
-import os
 import json
-import tempfile
 
 import pytest
 
-from nova.memory.engine import NovaMemory, TwoTierMemory
-
-
-@pytest.fixture
-def memory(tmp_path):
-    local_db = str(tmp_path / ".nova" / "nova.db")
-    global_db = str(tmp_path / "global_nova" / "nova.db")
-    mem = TwoTierMemory(local_db, global_db)
-    yield mem
-    mem.close()
+from nova.memory.engine import NovaMemory
 
 
 class TestMultiSessionFlow:
@@ -127,7 +116,7 @@ class TestMultiSessionFlow:
                                           "Always check connection before restarting services"])
 
         # Verify skill was improved (skill_add routes to global by default)
-        skill = memory._global._conn.execute("SELECT * FROM skills WHERE name='deploy-django'").fetchone()
+        skill = memory._conn.execute("SELECT * FROM skills WHERE name='deploy-django'").fetchone()
         assert skill is not None
         assert skill['version'] == 2
         pitfalls = json.loads(skill['pitfalls'])
@@ -173,7 +162,7 @@ class TestMultiSessionFlow:
                                 tool_result='important output')
 
         # Prune with 30 days — recent sessions should survive
-        memory.prune(max_age_days=30)
+        memory.prune_old_sessions(max_age_days=30)
 
         # Session and turns still exist
         turns = memory.session_turns_query(sid)

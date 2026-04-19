@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from nova.memory.engine import NovaMemory, TwoTierMemory, SCHEMA_V1, SCHEMA_V2
+from nova.memory.engine import NovaMemory, SCHEMA_V1, SCHEMA_V2
 
 
 @pytest.fixture
@@ -20,15 +20,8 @@ def global_db(tmp_path):
 
 
 @pytest.fixture
-def local_memory(local_db):
+def memory(local_db):
     mem = NovaMemory(local_db)
-    yield mem
-    mem.close()
-
-
-@pytest.fixture
-def two_tier(local_db, global_db):
-    mem = TwoTierMemory(local_db, global_db)
     yield mem
     mem.close()
 
@@ -37,8 +30,8 @@ def two_tier(local_db, global_db):
 
 
 class TestSkillAdd:
-    def test_add_skill_with_triggers_pitfalls(self, local_memory):
-        sid = local_memory.skill_add(
+    def test_add_skill_with_triggers_pitfalls(self, memory):
+        sid = memory.skill_add(
             "deploy-flask", "Deploy Flask app to server",
             ["1. Check config", "2. Upload files", "3. Verify: curl returns 200"],
             tags="deploy,flask,sop",
@@ -48,7 +41,7 @@ class TestSkillAdd:
         assert sid > 0
 
         # Verify stored correctly
-        row = local_memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
+        row = memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
         assert row['name'] == "deploy-flask"
         assert row['triggers'] == "deploy,flask,ssh,systemd"
         assert row['version'] == 1
@@ -56,33 +49,33 @@ class TestSkillAdd:
         assert len(pitfalls) == 2
         assert "Don't forget daemon-reload" in pitfalls
 
-    def test_add_skill_minimal(self, local_memory):
-        sid = local_memory.skill_add(
+    def test_add_skill_minimal(self, memory):
+        sid = memory.skill_add(
             "simple-task", "A simple SOP",
             ["1. Do thing", "2. Verify: check result"],
             triggers="simple,basic"
         )
         assert sid > 0
 
-    def test_add_skill_updates_existing(self, local_memory):
-        local_memory.skill_add(
+    def test_add_skill_updates_existing(self, memory):
+        memory.skill_add(
             "deploy-flask", "Deploy Flask app",
             ["1. Old step"],
             triggers="deploy,flask"
         )
-        local_memory.skill_add(
+        memory.skill_add(
             "deploy-flask", "Deploy Flask app v2",
             ["1. New step", "2. Verify: check output"],
             triggers="deploy,flask,ssh",
             pitfalls=["Don't skip verification"]
         )
-        row = local_memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
+        row = memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
         steps = json.loads(row['steps'])
         assert len(steps) == 2
         assert row['version'] == 2
 
-    def test_default_skill_has_triggers_pitfalls(self, local_memory):
-        row = local_memory._conn.execute("SELECT * FROM skills WHERE name='memory_management'").fetchone()
+    def test_default_skill_has_triggers_pitfalls(self, memory):
+        row = memory._conn.execute("SELECT * FROM skills WHERE name='memory_management'").fetchone()
         assert row['triggers'] == "memory,update,crystallize,facts,wiki,skills,knowledge"
         pitfalls = json.loads(row['pitfalls'])
         assert len(pitfalls) == 3
@@ -92,30 +85,30 @@ class TestSkillAdd:
 
 
 class TestSkillSearch:
-    def test_search_by_trigger_keywords(self, local_memory):
-        local_memory.skill_add(
+    def test_search_by_trigger_keywords(self, memory):
+        memory.skill_add(
             "deploy-flask", "Deploy Flask",
             ["1. Deploy", "2. Verify"],
             triggers="deploy,flask,ssh"
         )
-        results = local_memory.skill_search("deploy")
+        results = memory.skill_search("deploy")
         assert len(results) >= 1
         assert results[0]['name'] == 'deploy-flask'
         assert 'pitfalls' in results[0]
         assert isinstance(results[0]['pitfalls'], list)
 
-    def test_search_no_results(self, local_memory):
-        results = local_memory.skill_search("nonexistent_topic_xyz")
+    def test_search_no_results(self, memory):
+        results = memory.skill_search("nonexistent_topic_xyz")
         assert results == []
 
-    def test_search_min_success_filter(self, local_memory):
-        local_memory.skill_add(
+    def test_search_min_success_filter(self, memory):
+        memory.skill_add(
             "bad-skill", "A skill with low success",
             ["1. Try something"],
             triggers="bad,fail",
             success_rate=0.1
         )
-        results = local_memory.skill_search("bad", min_success=0.5)
+        results = memory.skill_search("bad", min_success=0.5)
         # Should not find the low-success skill
         assert not any(r['name'] == 'bad-skill' for r in results)
 
@@ -124,44 +117,44 @@ class TestSkillSearch:
 
 
 class TestSkillImprove:
-    def test_improve_skill_increments_version(self, local_memory):
-        local_memory.skill_add(
+    def test_improve_skill_increments_version(self, memory):
+        memory.skill_add(
             "deploy-flask", "Deploy Flask",
             ["1. Old step"],
             triggers="deploy,flask"
         )
-        result = local_memory.skill_improve(
+        result = memory.skill_improve(
             "deploy-flask",
             new_steps=["1. New step", "2. Verify"],
             new_pitfalls=["Don't skip step 2"]
         )
         assert result is True
-        row = local_memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
+        row = memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
         assert row['version'] == 2
         assert row['last_improved_at'] != ''
         steps = json.loads(row['steps'])
         assert len(steps) == 2
 
-    def test_improve_skill_merges_pitfalls(self, local_memory):
-        local_memory.skill_add(
+    def test_improve_skill_merges_pitfalls(self, memory):
+        memory.skill_add(
             "deploy-flask", "Deploy Flask",
             ["1. Step"],
             triggers="deploy",
             pitfalls=["Existing pitfall A"]
         )
-        local_memory.skill_improve(
+        memory.skill_improve(
             "deploy-flask",
             new_pitfalls=["New pitfall B", "Existing pitfall A"]
         )
-        row = local_memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
+        row = memory._conn.execute("SELECT * FROM skills WHERE name='deploy-flask'").fetchone()
         pitfalls = json.loads(row['pitfalls'])
         # Dedup: "Existing pitfall A" should not appear twice
         assert len(pitfalls) == 2
         assert "Existing pitfall A" in pitfalls
         assert "New pitfall B" in pitfalls
 
-    def test_improve_nonexistent_skill(self, local_memory):
-        result = local_memory.skill_improve("nonexistent-skill")
+    def test_improve_nonexistent_skill(self, memory):
+        result = memory.skill_improve("nonexistent-skill")
         assert result is False
 
 
@@ -169,96 +162,34 @@ class TestSkillImprove:
 
 
 class TestSkillMatch:
-    def test_match_by_trigger_keyword(self, local_memory):
-        local_memory.skill_add(
+    def test_match_by_trigger_keyword(self, memory):
+        memory.skill_add(
             "deploy-flask", "Deploy Flask",
             ["1. SSH", "2. Upload", "3. Verify: curl 200"],
             triggers="deploy,flask,ssh,systemd",
             pitfalls=["Don't skip daemon-reload"]
         )
-        results = local_memory.skill_match("deploy flask app to server")
+        results = memory.skill_match("deploy flask app to server")
         assert len(results) >= 1
         assert results[0]['name'] == 'deploy-flask'
         assert 'pitfalls' in results[0]
 
-    def test_match_no_stopwords(self, local_memory):
+    def test_match_no_stopwords(self, memory):
         # Query with only stopwords should return no matches
-        results = local_memory.skill_match("how to do the thing")
+        results = memory.skill_match("how to do the thing")
         assert results == []
 
-    def test_match_respects_min_success(self, local_memory):
-        local_memory.skill_add(
+    def test_match_respects_min_success(self, memory):
+        memory.skill_add(
             "broken-skill", "A broken SOP",
             ["1. Try"],
             triggers="broken,bad",
             success_rate=0.1
         )
-        results = local_memory.skill_match("broken bad task", min_success=0.5)
+        results = memory.skill_match("broken bad task", min_success=0.5)
         # broken-skill (success 0.1) must be filtered out
         broken_found = any(r['name'] == 'broken-skill' for r in results)
         assert not broken_found
-
-
-# ── TwoTierMemory skill operations ──
-
-
-class TestTwoTierSkillOps:
-    def test_skill_add_routes_to_global(self, two_tier):
-        sid = two_tier.skill_add(
-            "global-skill", "Cross-project skill",
-            ["1. Step"],
-            triggers="global,cross-project",
-            tier="global"
-        )
-        assert sid > 0
-        # Verify knowledge was produced (it sets a flag, doesn't return)
-        assert two_tier._knowledge_produced is True
-
-    def test_skill_search_both_tiers(self, two_tier):
-        two_tier.skill_add(
-            "local-skill", "Local only",
-            ["1. Local step"],
-            triggers="local,project",
-            tier="local"
-        )
-        two_tier.skill_add(
-            "global-skill", "Global only",
-            ["1. Global step"],
-            triggers="global,cross-project",
-            tier="global"
-        )
-        results = two_tier.skill_search("skill", tier="auto")
-        assert len(results) >= 2
-
-    def test_skill_match_both_tiers(self, two_tier):
-        two_tier.skill_add(
-            "deploy-local", "Local deploy SOP",
-            ["1. Deploy locally"],
-            triggers="deploy,local",
-            tier="local"
-        )
-        two_tier.skill_add(
-            "deploy-global", "Global deploy SOP",
-            ["1. Deploy globally"],
-            triggers="deploy,global",
-            tier="global"
-        )
-        results = two_tier.skill_match("deploy application", limit=2)
-        assert len(results) >= 1
-
-    def test_skill_improve_tier_routing(self, two_tier):
-        two_tier.skill_add(
-            "global-skill", "Global SOP",
-            ["1. Old step"],
-            triggers="global",
-            tier="global"
-        )
-        result = two_tier.skill_improve(
-            "global-skill",
-            new_steps=["1. New step", "2. Verify"],
-            tier="global"
-        )
-        assert result is True
 
 
 # ── Schema migration ──
@@ -395,13 +326,13 @@ class TestSchemaMigration:
 
 
 class TestSkillSQLQuery:
-    def test_db_query_can_select_skills(self, local_memory):
-        local_memory.skill_add(
+    def test_db_query_can_select_skills(self, memory):
+        memory.skill_add(
             "deploy-flask", "Deploy Flask",
             ["1. Deploy", "2. Verify"],
             triggers="deploy,flask,ssh"
         )
-        result = local_memory.safe_query("SELECT name, triggers, version FROM skills WHERE triggers LIKE '%deploy%'")
+        result = memory.safe_query("SELECT name, triggers, version FROM skills WHERE triggers LIKE '%deploy%'")
         assert result['status'] == 'success'
         assert len(result['rows']) >= 1
         assert result['rows'][0]['name'] == 'deploy-flask'

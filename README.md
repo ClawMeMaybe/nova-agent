@@ -1,6 +1,6 @@
 # Nova Agent
 
-> Self-evolving AI agent with compounding knowledge — minimal loop, atomic tools, two-tier SQL+Wiki memory.
+> Self-evolving AI agent with compounding knowledge — minimal loop, atomic tools, unified SQLite memory with project scoping.
 
 The longer you use Nova, the smarter it gets. Every session crystallizes knowledge into a persistent wiki, facts accumulate with trust scores, and scheduled tasks maintain your memory automatically. When you step away, Nova plans its own improvement tasks.
 
@@ -16,11 +16,15 @@ Plus **Karpathy's LLM Wiki concept**: persistent knowledge that compounds across
 ## Features at a Glance
 
 - **~100-line core loop** — perceive → reason → execute → remember
-- **17 tools** — code, files, web, memory, wiki, facts, SQL, cron
-- **Two-tier memory** — project-local + global SQLite with FTS5 search
+- **31 tools** — code, files, web, memory, wiki, facts, skills, links, clusters, SQL, cron, projects, promotion
+- **Unified memory** — single SQLite DB (`~/.nova/nova.db`) with project_id scoping
+- **Project scoping** — create named projects, scope knowledge per project, promote to global
 - **Trust evolution** — facts gain/lose trust through asymmetric feedback (+0.05/-0.10)
 - **Proactive recall** — relevant knowledge auto-injected before each task
 - **Wiki compounding** — append-only knowledge pages that grow across sessions
+- **Knowledge links** — connect facts, skills, and wiki pages (depends_on, related_to, contradicts)
+- **Cluster search** — tag-based knowledge bundles spanning facts + skills + wiki
+- **Per-turn feedback** — mark knowledge helpful/unhelpful, cascade flags to linked items
 - **Cron scheduling** — LLM-manageable recurring tasks with grace windows
 - **Autonomous self-improvement** — idle >30min triggers auto-task planning
 - **7 channels** — CLI, Telegram, Discord, WeChat, Feishu, QQ, DingTalk, Web
@@ -34,11 +38,11 @@ nova/
   main.py              — Agent orchestrator + CLI
   autonomous.py        — Idle self-improvement monitor
   tools/
-    handler.py         — 17 atomic + memory + wiki/fact + cron tools
+    handler.py         — 31 tools: atomic, memory, wiki/fact/skill, link/cluster, project, cron
   memory/
-    engine.py          — Two-tier SQLite+FTS5 with trust evolution
+    engine.py          — Unified SQLite+FTS5 with project_id scoping, trust evolution, links, clusters
   context/
-    system_prompt.py   — Dynamic prompt builder (meta rules + catalog)
+    system_prompt.py   — Dynamic prompt builder (meta rules + catalog + proactive recall)
   cron/
     jobs.py            — Job storage, schedule parsing, CRUD
     scheduler.py       — Tick-based execution with file locking
@@ -51,7 +55,7 @@ nova/
     dingtalk.py         — DingTalk channel
     webhook.py         — HTTP webhook + web UI
   assets/
-    tools_schema.json  — Tool definitions (17 tools)
+    tools_schema.json  — Tool definitions (31 tools)
 ```
 
 ## Quick Start
@@ -73,28 +77,42 @@ export ANTHROPIC_API_KEY=your-key-here
 nova
 ```
 
-## Memory System: Two-Tier SQL + Wiki Compounding
+## Memory System: Unified SQLite with Project Scoping
 
-Nova's memory is SQLite-backed with two tiers:
+Nova's memory uses a single SQLite database (`~/.nova/nova.db`) with project_id columns for scoping:
 
-| Tier | Location | Purpose |
-|------|----------|---------|
-| **Local** | `<project>/.nova/nova.db` | Project-specific: paths, configs, debugging notes |
-| **Global** | `~/.nova/nova.db` | Cross-project: patterns, conventions, decisions, skills |
+| Scope | project_id | Purpose |
+|-------|-----------|---------|
+| **Global** | `NULL` | Cross-project knowledge: patterns, conventions, decisions, skills |
+| **Project** | UUID | Project-specific: paths, configs, debugging notes, environment details |
 
-Both tiers share the same schema:
+**Reads** search both global + current project scope (`WHERE project_id IS NULL OR project_id = ?`).
+**Writes** go to current project scope if selected, otherwise global.
+**Evolution** operates on ALL data regardless of project_id — this is the key advantage over the old two-tier system.
+
+### Schema
 
 ```
-wiki_pages   — Rich knowledge pages (markdown, tags, categories)
-facts        — Verified facts with trust scores (0.0-1.0)
-skills       — Crystallized SOPs with success rates
-sessions     — Task archives with auto-crystallization
-FTS5 indexes — Fast keyword + tag search on all tables
+projects       — Named project scopes (id, name, description)
+wiki_pages     — Rich knowledge pages (markdown, tags, categories, confidence)
+facts          — Verified facts with trust scores (0.0-1.0) + needs_review cascade flags
+skills         — Crystallized SOPs with success rates and usage counts
+sessions       — Task archives with auto-crystallization
+session_turns  — Per-turn records with tool usage and feedback events
+knowledge_links — Cross-type connections (fact→skill, skill→wiki, fact→fact)
+feedback_events — Per-turn helpful/unhelpful feedback with trust/success rate updates
+evolution_log  — Evolution score trajectory with loss components
+FTS5 indexes   — Fast keyword + tag search on wiki, facts, skills
 ```
 
-Category routing is automatic:
-- `environment/debugging/session-log` → local tier
-- `pattern/convention/decision` → global tier
+### Knowledge Promotion
+
+Knowledge created in a project scope can be promoted to global:
+- `fact_promote(fact_id)` — `UPDATE facts SET project_id = NULL`
+- `skill_promote(skill_name)` — `UPDATE skills SET project_id = NULL`
+- `wiki_promote(slug)` — `UPDATE wiki_pages SET project_id = NULL`
+
+This replaces the old tier routing — promotion is now an explicit user/agent action, not automatic category routing.
 
 ### Trust Evolution
 
@@ -108,9 +126,29 @@ Facts evolve trust over time through asymmetric feedback:
 
 This asymmetry prevents low-quality facts from accumulating while proven knowledge compounds.
 
+### Per-Turn Feedback
+
+Each task turn can mark accessed knowledge as helpful or unhelpful:
+- `fact_feedback` / `skill_feedback` — explicit feedback with optional reason
+- Feedback updates trust scores AND success rates
+- Unhelpful feedback cascades: linked skills get `needs_review=1` flag
+- Evolution loss uses feedback ratio for knowledge quality metric
+
+### Knowledge Links & Clusters
+
+**Links** connect knowledge items across types:
+- `depends_on` — fact supports a skill, skill references a wiki page
+- `related_to` — loosely related items across domains
+- `contradicts` — conflicting facts (both flagged for review)
+
+**Cluster search** bundles related items by tag overlap:
+- Input: `"flask deployment"` → finds facts + skills + wiki pages sharing flask/deployment tags
+- Relevance scored by tag overlap ratio
+- Cross-domain bundles emerge naturally as knowledge compounds
+
 ### Proactive Recall
 
-Before each task, Nova extracts keywords and searches both tiers for relevant facts and wiki pages. Matching knowledge is injected into the task prompt automatically — you don't need to explicitly search before starting.
+Before each task, Nova extracts keywords and searches for relevant facts. Matching knowledge is injected into the task prompt automatically — you don't need to explicitly search before starting.
 
 ### Wiki Compounding
 
@@ -126,8 +164,31 @@ Wiki pages support categories, tags, confidence levels, cross-references (`[[pag
 The `db_query` tool gives the agent direct SQL access to its own memory:
 - **Allowed**: SELECT, INSERT, UPDATE
 - **Blocked**: DELETE, DROP, ALTER, CREATE, PRAGMA
-- **Whitelisted tables**: wiki_pages, facts, skills, sessions
+- **Whitelisted tables**: wiki_pages, facts, skills, sessions, knowledge_links, feedback_events, session_turns, evolution_log, projects
 - **Max 50 rows** per query
+
+## Project Management
+
+Nova supports named project scopes for organizing knowledge:
+
+```
+project_create(name="my-app", description="Mobile app project")
+project_select(project_id=UUID)     → Scope all knowledge to this project
+project_list()                      → Show all projects
+project_info(project_id=UUID)       → Project details + knowledge counts
+```
+
+When a project is selected:
+- New facts, skills, wiki pages get that project_id
+- Searches include both global + project-scoped knowledge
+- Stats show per-project breakdown (total, global, project counts)
+
+Promote project-specific knowledge to global when it proves useful across projects:
+```
+fact_promote(fact_id)     → Make this fact available globally
+skill_promote(skill_name) → Make this skill available globally
+wiki_promote(slug)        → Make this wiki page available globally
+```
 
 ## Cron System
 
@@ -184,11 +245,25 @@ Autonomous mode never calls `ask_user` — it solves independently and crystalli
 | `start_long_term_update` | Distill experience into long-term memory |
 | `wiki_ingest` | Add knowledge to compounding wiki |
 | `wiki_query` | Search wiki pages by keywords/tags |
+| `wiki_export` | Export wiki to markdown files |
 | `fact_add` | Add verified fact with trust scoring |
 | `fact_search` | Search trust-ranked facts |
+| `fact_feedback` | Mark fact helpful/unhelpful with optional reason |
+| `skill_add` | Add crystallized skill with steps and triggers |
+| `skill_feedback` | Mark skill helpful/unhelpful |
+| `skill_search` | Search skills by triggers or keywords |
 | `db_query` | Execute SQL against knowledge database |
 | `db_schema` | Inspect database schema |
-| `wiki_export` | Export wiki to markdown files |
+| `link_add` | Create knowledge link between items |
+| `link_search` | Search knowledge links by type/source/target |
+| `cluster_search` | Find knowledge bundles by tag overlap |
+| `project_create` | Create a named project scope |
+| `project_select` | Select a project for scoped operations |
+| `project_list` | List all projects |
+| `project_info` | Get project details and knowledge counts |
+| `fact_promote` | Promote fact from project scope to global |
+| `skill_promote` | Promote skill from project scope to global |
+| `wiki_promote` | Promote wiki page from project scope to global |
 | `cron` | Manage scheduled recurring tasks |
 
 ## CLI Commands
@@ -196,7 +271,7 @@ Autonomous mode never calls `ask_user` — it solves independently and crystalli
 | Command | Description |
 |---------|-------------|
 | `/quit` | Exit the agent |
-| `/stats` | Show memory statistics (wiki, facts, skills, trust) |
+| `/stats` | Show memory statistics (total, global, project counts, trust, evolution) |
 | `/wiki` | List all wiki pages |
 | `/cron` | List all scheduled cron jobs |
 | `/todo` | Show autonomous TODO list |
@@ -235,10 +310,14 @@ Set at least one LLM API key. Nova supports three providers:
 | Feature | Hermes | GenericAgent | OpenClaw | Nova |
 |---------|--------|--------------|----------|------|
 | Core loop size | ~100 lines | ~100 lines | Large | ~100 lines |
-| Memory | Holographic (trust, asymmetric) | L0-L4 layers | SOUL.md persona | Two-tier SQL+Wiki (both) |
+| Memory | Holographic (trust, asymmetric) | L0-L4 layers | SOUL.md persona | Unified SQL+Wiki+Projects |
 | Self-improvement | Skills from experience | Idle autonomous mode | Cron scheduling | Autonomous + Cron (both) |
-| Trust scoring | Yes (asymmetric) | No | No | Yes (asymmetric + decay) |
+| Trust scoring | Yes (asymmetric) | No | No | Yes (asymmetric + decay + feedback events) |
 | Proactive recall | No | No | No | Yes (keyword injection) |
+| Knowledge links | No | No | No | Yes (cross-type: fact↔skill↔wiki) |
+| Cluster search | No | No | No | Yes (tag-based bundles) |
+| Per-turn feedback | No | No | No | Yes (helpful/unhelpful + cascade) |
+| Project scoping | No | No | No | Yes (named projects + promotion) |
 | LLM-manageable cron | Yes | No | No | Yes |
 | Grace windows | Yes | No | No | Yes |
 | SQL sandbox | No | No | No | Yes (blocked ops) |

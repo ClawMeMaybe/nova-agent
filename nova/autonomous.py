@@ -66,17 +66,16 @@ class AutonomousMonitor:
         stats = self.agent.memory.stats()
 
         # Check for existing TODO in memory
-        todo_page = self.agent.memory.wiki_read('autonomous-todo', tier='global')
+        todo_page = self.agent.memory.wiki_read('autonomous-todo')
         todo_content = ""
         if todo_page and todo_page.get('content'):
             todo_content = todo_page['content']
 
         prompt = "[AUTONOMOUS MODE] Self-improvement session — user is idle.\n\n"
         prompt += "## Memory Stats\n"
-        prompt += f"- Local: {stats['local_wiki_pages']} wiki, {stats['local_facts']} facts, {stats['local_skills']} skills\n"
+        prompt += f"- Total: {stats['total_wiki_pages']} wiki, {stats['total_facts']} facts, {stats['total_skills']} skills\n"
         prompt += f"- Global: {stats['global_wiki_pages']} wiki, {stats['global_facts']} facts, {stats['global_skills']} skills\n"
-        prompt += f"- Avg trust (local): {stats['local_avg_trust']:.2f}, (global): {stats['global_avg_trust']:.2f}\n"
-        prompt += f"- Evolution score: {stats['evolution_score']:.2f} (trend: {'↑' if stats['evolution_trend'] > 0 else '↓' if stats['evolution_trend'] < 0 else '—'})\n\n"
+        prompt += f"- Avg trust: {stats['avg_trust']:.2f}, Evolution score: {stats['evolution_score']:.2f} (trend: {'↑' if stats['evolution_trend'] > 0 else '↓' if stats['evolution_trend'] < 0 else '—'})\n\n"
 
         # Evolution gradient direction — prioritize improvement targets from loss function
         if stats['evolution_trend'] < 0:
@@ -86,7 +85,7 @@ class AutonomousMonitor:
             prompt += "Priority formula: improvement_targets × loss_magnitude → fix highest-loss skill first.\n"
             # Inject hindsight hints from recent failures (OPD-inspired)
             try:
-                hints = self.agent.memory._local._conn.execute(
+                hints = self.agent.memory._conn.execute(
                     "SELECT hindsight_hint FROM evolution_log WHERE loss_task > 0 AND hindsight_hint != '' ORDER BY created_at DESC LIMIT 2"
                 ).fetchall()
                 if hints:

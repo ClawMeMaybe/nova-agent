@@ -7,16 +7,15 @@ import os
 import pytest
 
 from nova.autonomous import AutonomousMonitor, IDLE_THRESHOLD, CHECK_INTERVAL
-from nova.memory.engine import TwoTierMemory
+from nova.memory.engine import NovaMemory
 
 
 class MockAgent:
     """Minimal agent mock for testing autonomous monitor."""
     def __init__(self, tmpdir):
-        local_db = os.path.join(tmpdir, '.nova', 'local.db')
-        global_db = os.path.join(tmpdir, '.nova', 'global.db')
+        db_path = os.path.join(tmpdir, '.nova', 'nova.db')
         os.makedirs(os.path.join(tmpdir, '.nova'), exist_ok=True)
-        self.memory = TwoTierMemory(local_db, global_db)
+        self.memory = NovaMemory(db_path)
         self.is_running = False
         self._put_task_args = None
 
@@ -55,8 +54,7 @@ class TestPromptBuilding:
             "autonomous-todo",
             "1. Review memory for stale facts\n2. Check environment setup",
             "autonomous,todo",
-            category="decision",
-            tier="global"
+            category="decision"
         )
         monitor = AutonomousMonitor(mock_agent)
         prompt = monitor._build_autonomous_prompt()
