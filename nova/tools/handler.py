@@ -985,6 +985,46 @@ class NovaHandler(BaseHandler):
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
 
+    # ── Project Sync ──
+
+    def do_project_learn(self, args, response):
+        """Learn about the current project directory — scan and return structured info for knowledge generation.
+
+        This is a read-only scan — it gathers directory info, the LLM then decides
+        what knowledge to create using fact_add, wiki_ingest, skill_add, link_add.
+        """
+        from nova.main import build_learn_prompt
+
+        project_root = args.get("project_root", self.cwd)
+        depth = args.get("depth", "standard")
+
+        try:
+            scan = self.memory.project_scan(project_root, depth=depth)
+
+            # Build structured prompt with quality guidelines
+            learn_text = build_learn_prompt(scan)
+
+            result = {
+                "status": "success",
+                "msg": f"Project '{scan['project_name']}' learned (depth={depth}). "
+                       f"Language: {scan['language']}, {len(scan['file_tree'])} files found.",
+                "learn_data": learn_text,
+                "project_name": scan['project_name'],
+                "language": scan['language'],
+                "file_count": len(scan['file_tree']),
+                "test_framework": scan['test_framework'],
+                "lint_tool": scan['lint_tool'],
+            }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        # Return learn data in next_prompt so the LLM can analyze it
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        if result.get('learn_data'):
+            next_prompt += f"\n{result['learn_data']}\n"
+
+        return StepOutcome(result, next_prompt=next_prompt)
+
     # ── Meta tool ──
 
     def do_no_tool(self, args, response):

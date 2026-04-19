@@ -2215,5 +2215,209 @@ class NovaMemory:
                 return {"status": "error", "msg": str(e)}
 
 
+# ── Project Scan (read-only directory analysis for /learn) ──
+
+    def project_scan(self, project_root: str, depth: str = 'standard') -> dict:
+        """Scan a project directory and return structured info for LLM-driven knowledge generation.
+
+        Read-only — gathers info from the filesystem, doesn't write to memory.
+        The LLM decides what knowledge to create from this scan data.
+        """
+        import os as _os
+
+        result = {
+            'project_root': project_root,
+            'project_name': _os.path.basename(project_root),
+            'depth': depth,
+            'readme': '',
+            'package_config': '',
+            'file_tree': [],
+            'language': '',
+            'key_dirs': [],
+            'dependencies': [],
+            'test_framework': '',
+            'lint_tool': '',
+            'project_knowledge_files': '',
+            'workspace_configs': '',
+            'infrastructure_configs': '',
+            'ci_configs': '',
+        }
+
+        # ── Read README ──
+        readme_paths = ['README.md', 'README.rst', 'README.txt', 'README']
+        for rp in readme_paths:
+            full = _os.path.join(project_root, rp)
+            if _os.path.isfile(full):
+                try:
+                    with open(full, 'r', encoding='utf-8', errors='replace') as f:
+                        content = f.read(5000)
+                    result['readme'] = content
+                    break
+                except Exception:
+                    pass
+
+        # ── Read package config ──
+        config_paths = [
+            ('pyproject.toml', 'python'),
+            ('setup.py', 'python'),
+            ('setup.cfg', 'python'),
+            ('requirements.txt', 'python'),
+            ('package.json', 'javascript'),
+            ('Cargo.toml', 'rust'),
+            ('go.mod', 'go'),
+            ('Gemfile', 'ruby'),
+            ('pom.xml', 'java'),
+            ('build.gradle', 'java'),
+            ('Makefile', 'mixed'),
+        ]
+        for cp, lang in config_paths:
+            full = _os.path.join(project_root, cp)
+            if _os.path.isfile(full):
+                try:
+                    with open(full, 'r', encoding='utf-8', errors='replace') as f:
+                        content = f.read(3000)
+                    result['package_config'] += f"\n--- {cp} ---\n{content}\n"
+                    if not result['language']:
+                        result['language'] = lang
+                except Exception:
+                    pass
+
+        # ── Scan file tree ──
+        max_depth = {'quick': 1, 'standard': 2, 'deep': 3}.get(depth, 2)
+        skip_dirs = {'.git', '.venv', 'venv', '__pycache__', 'node_modules', '.nova', '.omc',
+                     'dist', 'build', '.pytest_cache', '.tox', 'egg-info', '.mypy_cache', '.idea'}
+
+        def _scan_dir(path, level):
+            if level > max_depth:
+                return []
+            items = []
+            try:
+                for entry in sorted(_os.listdir(path)):
+                    if entry in skip_dirs or entry.startswith('.'):
+                        continue
+                    full = _os.path.join(path, entry)
+                    if _os.path.isdir(full):
+                        items.append(f"{entry}/")
+                        if level < max_depth:
+                            items.extend(_scan_dir(full, level + 1))
+                    else:
+                        items.append(entry)
+            except Exception:
+                pass
+            return items
+
+        result['file_tree'] = _scan_dir(project_root, 1)
+
+        # ── Detect key directories ──
+        common_src_dirs = ['src', 'lib', 'app', 'nova', 'cmd', 'pkg', 'internal', 'core']
+        common_test_dirs = ['tests', 'test', 'spec', '__tests__']
+        for entry in result['file_tree']:
+            if entry.endswith('/') and entry.rstrip('/') in common_src_dirs:
+                result['key_dirs'].append(entry.rstrip('/'))
+            if entry.endswith('/') and entry.rstrip('/') in common_test_dirs:
+                result['key_dirs'].append(entry.rstrip('/'))
+
+        # ── Detect test/lint from config ──
+        config_lower = result['package_config'].lower()
+        if 'pytest' in config_lower:
+            result['test_framework'] = 'pytest'
+        elif 'unittest' in config_lower:
+            result['test_framework'] = 'unittest'
+        elif 'jest' in config_lower:
+            result['test_framework'] = 'jest'
+        elif 'vitest' in config_lower:
+            result['test_framework'] = 'vitest'
+        elif 'playwright' in config_lower:
+            result['test_framework'] = 'playwright'
+        elif 'mocha' in config_lower:
+            result['test_framework'] = 'mocha'
+        if 'ruff' in config_lower:
+            result['lint_tool'] = 'ruff'
+        elif 'flake8' in config_lower:
+            result['lint_tool'] = 'flake8'
+        elif 'eslint' in config_lower:
+            result['lint_tool'] = 'eslint'
+
+        # ── Extract dependencies from package config ──
+        import re as _re
+        # npm dependencies — only from "dependencies" and "devDependencies" blocks
+        for block_match in _re.finditer(
+            r'"(?:dev)?[dD]ependencies"\s*:\s*\{([^}]+)\}',
+            result['package_config']
+        ):
+            for dep_match in _re.finditer(
+                r'"([a-zA-Z0-9_/@.-]+)":\s*"[^"]*"',
+                block_match.group(1)
+            ):
+                result['dependencies'].append(dep_match.group(1))
+        # Python requirements — lines starting with a package name (not comments/flags)
+        for line in config_lower.splitlines():
+            line = line.strip()
+            if line.startswith('#') or line.startswith('-') or line.startswith('['):
+                continue
+            dep = _re.match(r'^([a-zA-Z0-9_-]+)', line)
+            if dep and dep.group(1) not in ('the', 'and', 'for', 'with', 'from', 'import',
+                                             'install', 'requires', 'project', 'tool', 'build',
+                                             'source', 'options', 'include'):
+                result['dependencies'].append(dep.group(1))
+
+        result['dependencies'] = list(set(result['dependencies']))[:30]
+
+        # ── Read project knowledge files (CLAUDE.md, AGENTS.md, etc.) ──
+        knowledge_paths = ['CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md', 'CODESTYLE.md']
+        for kp in knowledge_paths:
+            full = _os.path.join(project_root, kp)
+            if _os.path.isfile(full):
+                try:
+                    with open(full, 'r', encoding='utf-8', errors='replace') as f:
+                        result['project_knowledge_files'] += f"\n--- {kp} ---\n{f.read(5000)}\n"
+                except Exception:
+                    pass
+
+        # ── Read workspace/sub-package configs ──
+        workspace_dirs = ['packages', 'libs', 'modules', 'apps', 'services']
+        for wd in workspace_dirs:
+            wd_full = _os.path.join(project_root, wd)
+            if _os.path.isdir(wd_full):
+                for entry in sorted(_os.listdir(wd_full)):
+                    entry_full = _os.path.join(wd_full, entry)
+                    pj = _os.path.join(entry_full, 'package.json')
+                    pyproj = _os.path.join(entry_full, 'pyproject.toml')
+                    for cfg in [pj, pyproj]:
+                        if _os.path.isfile(cfg):
+                            try:
+                                with open(cfg, 'r', encoding='utf-8', errors='replace') as f:
+                                    result['workspace_configs'] += f"\n--- {wd}/{entry}/{_os.path.basename(cfg)} ---\n{f.read(3000)}\n"
+                            except Exception:
+                                pass
+
+        # ── Read infrastructure configs ──
+        infra_paths = [
+            'tsconfig.json', 'docker-compose.yml', 'docker-compose.dev.yml',
+            '.env.example', 'nginx.conf', 'Makefile', 'Vagrantfile',
+        ]
+        for ip in infra_paths:
+            full = _os.path.join(project_root, ip)
+            if _os.path.isfile(full):
+                try:
+                    with open(full, 'r', encoding='utf-8', errors='replace') as f:
+                        result['infrastructure_configs'] += f"\n--- {ip} ---\n{f.read(3000)}\n"
+                except Exception:
+                    pass
+
+        # ── Read CI configs ──
+        ci_base = _os.path.join(project_root, '.github', 'workflows')
+        if _os.path.isdir(ci_base):
+            for ci_file in sorted(_os.listdir(ci_base))[:5]:
+                ci_full = _os.path.join(ci_base, ci_file)
+                try:
+                    with open(ci_full, 'r', encoding='utf-8', errors='replace') as f:
+                        result['ci_configs'] += f"\n--- .github/workflows/{ci_file} ---\n{f.read(2000)}\n"
+                except Exception:
+                    pass
+
+        return result
+
+
 # ── Legacy alias ──
 MemoryEngine = NovaMemory

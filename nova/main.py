@@ -28,6 +28,51 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 HOME_DIR = os.path.expanduser('~')
 
 
+def build_learn_prompt(scan):
+    """Build a structured learn prompt with quality guidelines and examples."""
+    prompt = (
+        "Generate structured project knowledge from the scan data below.\n"
+        "Follow these quality guidelines:\n\n"
+        "**Facts** — must be actionable with specific values, not just descriptions:\n"
+        "  Good: 'Gateway module connects to OpenClaw devices on WebSocket port 18789, supports loopback/LAN bindings'\n"
+        "  Bad: 'Backend has a gateway module'\n"
+        "  Include: ports, paths, commands, thresholds, version numbers, config values\n\n"
+        "**Wiki pages** — must include concrete details:\n"
+        "  Include: tables with routes/components, file paths, configuration values, build commands, framework versions\n\n"
+        "**Skills** — must have imperative steps with specific commands:\n"
+        "  Good: '1. npm run build --workspace=@clawmemaybe/shared' (specific command)\n"
+        "  Bad: '1. Build the project' (vague)\n"
+        "  Include: pitfalls with concrete failure modes\n\n"
+        "**Dedup**: Before creating each knowledge item, search existing knowledge (fact_search, wiki_query, skill_search) "
+        "to check if similar knowledge already exists. Skip creating items that are already well-covered.\n\n"
+        "Here is the scan data:\n\n"
+    )
+
+    # Core scan fields
+    prompt += f"Project: {scan['project_name']}\n"
+    prompt += f"Language: {scan['language']}\n"
+    prompt += f"Test framework: {scan['test_framework']}\n"
+    prompt += f"Lint tool: {scan['lint_tool']}\n"
+    prompt += f"Key directories: {scan['key_dirs']}\n"
+    prompt += f"Files found: {len(scan['file_tree'])}\n"
+
+    if scan['readme']:
+        prompt += f"\n## README\n{scan['readme'][:4000]}\n"
+    if scan['package_config']:
+        prompt += f"\n## Root Package Config\n{scan['package_config'][:3000]}\n"
+    if scan['project_knowledge_files']:
+        prompt += f"\n## Project Knowledge Files (CLAUDE.md, AGENTS.md)\n{scan['project_knowledge_files'][:6000]}\n"
+    if scan['workspace_configs']:
+        prompt += f"\n## Workspace/Package Configs\n{scan['workspace_configs'][:4000]}\n"
+    if scan['infrastructure_configs']:
+        prompt += f"\n## Infrastructure Configs (Docker, tsconfig, .env)\n{scan['infrastructure_configs'][:3000]}\n"
+    if scan['ci_configs']:
+        prompt += f"\n## CI Configs\n{scan['ci_configs'][:2000]}\n"
+
+    prompt += "\nCreate facts, wiki pages, and skills about this project. Prioritize actionable knowledge."
+    return prompt
+
+
 def _resolve_project_root():
     """Determine project root from cwd or NOVA_PROJECT_ROOT env var."""
     env_root = os.environ.get('NOVA_PROJECT_ROOT')
@@ -260,6 +305,39 @@ class NovaAgent:
                         print("  No evolution log entries yet. Complete a task to start tracking.")
                 except Exception:
                     print("  Evolution log not yet available (needs V4 schema migration).")
+                continue
+            if q == '/learn':
+                project_root = os.getcwd()
+                project_name = os.path.basename(project_root)
+                scan = self.memory.project_scan(project_root, depth='standard')
+                # Auto-create project scope from directory name
+                try:
+                    pid = self.memory.project_create(project_name, f"Auto-learned from {project_root}")
+                    self.memory.project_select(pid)
+                    self.current_project_id = pid
+                    print(f"Created project scope '{project_name}' (id={pid})")
+                except Exception:
+                    print(f"Project '{project_name}' already exists, using existing scope")
+                    projects = self.memory.project_list()
+                    for p in projects:
+                        if p['name'] == project_name:
+                            self.memory.project_select(p['id'])
+                            self.current_project_id = p['id']
+                            break
+                learn_prompt = build_learn_prompt(scan)
+                dq = self.put_task(learn_prompt)
+                while True:
+                    try:
+                        item = dq.get(timeout=600)
+                    except queue.Empty:
+                        break
+                    if 'done' in item:
+                        print(f"[Sync] Knowledge generation complete.")
+                        stats = self.memory.stats()
+                        print(f"[Stats] Facts: {stats['total_facts']} | Skills: {stats['total_skills']} | Wiki: {stats['total_wiki_pages']}")
+                        break
+                    if 'next' in item:
+                        print(item['next'][:200], end='', flush=True)
                 continue
 
             dq = self.put_task(q)

@@ -659,5 +659,24 @@
       },
       "required": ["slug"]
     }
+  },
+  {
+    "name": "project_learn",
+    "description": "Learn about the current project directory — scan it and return structured info for knowledge generation. Reads README, CLAUDE.md/AGENTS.md, package configs, workspace configs, infrastructure configs, and file tree. The agent then uses this scan data to create facts, wiki pages, skills, and knowledge links about the project's architecture, conventions, and patterns.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "project_root": {
+          "type": "string",
+          "description": "Path to project root directory. Defaults to cwd."
+        },
+        "depth": {
+          "type": "string",
+          "enum": ["quick", "standard", "deep"],
+          "description": "Scan depth: quick=top-level files only, standard=top-level + src structure, deep=full analysis with nested directories"
+        }
+      },
+      "required": []
+    }
   }
 ]

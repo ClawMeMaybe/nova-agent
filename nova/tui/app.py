@@ -6,6 +6,8 @@ Content prints inline, just like aider/claude-code/opencode.
 
 import json
 import logging
+import os
+import queue
 import threading
 
 from rich.console import Console
@@ -17,6 +19,7 @@ from prompt_toolkit.history import InMemoryHistory
 
 from nova import __version__
 from nova.events import AgentEvent, EventBus
+from nova.main import build_learn_prompt
 from nova.tui.styles.theme import get_color
 
 logger = logging.getLogger("nova")
@@ -28,6 +31,7 @@ COMMANDS = {
     "/cron": "List cron jobs",
     "/todo": "Show autonomous TODO",
     "/evolve": "Show evolution score",
+    "/learn": "Learn about current project directory and generate knowledge",
     "/help": "Show available commands",
 }
 
@@ -296,7 +300,40 @@ Type your message, or `/help` for commands.""")
                 pass
             return
 
-        # Unknown /command — treat as task input
+        if cmd == "/learn":
+            project_root = os.getcwd()
+            project_name = os.path.basename(project_root)
+            scan = self.agent.memory.project_scan(project_root, depth='standard')
+            # Auto-create project scope
+            try:
+                pid = self.agent.memory.project_create(project_name, f"Auto-learned from {project_root}")
+                self.agent.memory.project_select(pid)
+                self.agent.current_project_id = pid
+                self.console.print(f"[bold]Created project scope:[/] {project_name} (id={pid})")
+            except Exception:
+                projects = self.agent.memory.project_list()
+                for p in projects:
+                    if p['name'] == project_name:
+                        self.agent.memory.project_select(p['id'])
+                        self.agent.current_project_id = p['id']
+                        break
+                self.console.print(f"[bold]Using existing project scope:[/] {project_name}")
+            learn_prompt = build_learn_prompt(scan)
+            dq = self.agent.put_task(learn_prompt, source="user")
+            # Wait for learn to complete
+            while True:
+                self._flush_events()
+                try:
+                    item = dq.get(timeout=0.5)
+                except queue.Empty:
+                    if not self.agent.is_running:
+                        break
+                    continue
+                if 'done' in item:
+                    stats = self.agent.memory.stats()
+                    self.console.print(f"[bold]Sync complete![/] Facts: {stats['total_facts']} | Skills: {stats['total_skills']} | Wiki: {stats['total_wiki_pages']}")
+                    break
+            return
         user_color = get_color("user-msg")
         self.console.print(f"[bold {user_color}]You:[/] {cmd}")
         self.agent.put_task(cmd, source="user")
