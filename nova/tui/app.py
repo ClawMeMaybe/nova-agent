@@ -26,6 +26,49 @@ from nova.tui.styles.theme import get_color
 
 logger = logging.getLogger("nova")
 
+
+def _github_find_skills(owner, repo, branch="main"):
+    """Discover skill .md files in a GitHub repo via gh api.
+
+    Searches for SKILL.md, *.skill.md, and .md files in 'skills/' directories.
+    Returns list of (skill_name, raw_url) tuples.
+    """
+    import subprocess
+    skill_files = []
+    skill_dirs_found = []
+
+    def _scan_dir(path="", in_skill_zone=False):
+        try:
+            api_path = f"repos/{owner}/{repo}/contents/{path}?ref={branch}" if path else f"repos/{owner}/{repo}/contents?ref={branch}"
+            result = subprocess.run(
+                ["gh", "api", api_path, "--jq", ".[] | .name + \" \" + .type"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                return
+            entries = result.stdout.strip().split("\n")
+            for entry in entries:
+                parts = entry.rsplit(" ", 1)
+                if len(parts) != 2:
+                    continue
+                name, typ = parts
+                full_path = f"{path}/{name}" if path else name
+                if typ == "dir":
+                    if name == "skills" or name == ".claude-plugin":
+                        skill_dirs_found.append(full_path)
+                        _scan_dir(full_path, in_skill_zone=True)
+                    elif in_skill_zone:
+                        _scan_dir(full_path, in_skill_zone=True)
+                elif typ == "file" and name.endswith(".md") and in_skill_zone:
+                    skill_name = name.replace(".skill.md", "").replace(".md", "")
+                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{full_path}"
+                    skill_files.append((skill_name, raw_url))
+        except Exception:
+            pass
+
+    _scan_dir()
+    return skill_files
+
 COMMANDS = {
     "/quit": "Exit Nova Agent",
     "/exit": "Exit Nova Agent",
@@ -367,6 +410,43 @@ Type your message, or `/help` for commands.""")
                 self.console.print("[bold]Usage:[/] /skill-install <file_path_or_url>")
                 return
 
+            # GitHub repo URL → discover skill .md files via gh api
+            github_match = None
+            import re
+            github_match = re.match(
+                r'https?://github\.com/([^/]+)/([^/]+)(?:/tree/([^/]+))?',
+                source
+            )
+            if github_match:
+                owner, repo, branch = github_match.groups()
+                branch = branch or "main"
+                self.console.print(f"[bold]Scanning GitHub repo:[/] {owner}/{repo}")
+                skill_urls = _github_find_skills(owner, repo, branch)
+                if not skill_urls:
+                    self.console.print("[bold red]No skill .md files found in repo.[/]")
+                    return
+                self.console.print(f"Found {len(skill_urls)} skill(s): " + ", ".join(u[0] for u in skill_urls))
+                installed = 0
+                for skill_name, url in skill_urls:
+                    try:
+                        import urllib.request
+                        resp = urllib.request.urlopen(url, timeout=15)
+                        content = resp.read().decode("utf-8")
+                        parsed = parse_skill_markdown(content, filename=skill_name + ".md")
+                        self.agent.memory.skill_add(
+                            name=parsed["name"], description=parsed["description"],
+                            steps=[], triggers=parsed["triggers"],
+                            tags=parsed["tags"], contract=parsed["contract"],
+                        )
+                        self.console.print(f"[bold green]Installed:[/] {parsed['name']} ({len(parsed['contract'])} chars)")
+                        installed += 1
+                    except Exception as e:
+                        self.console.print(f"[bold red]Error installing {skill_name}:[/] {e}")
+                if installed:
+                    self.console.print(f"[bold green]{installed} skill(s) installed from {owner}/{repo}[/]")
+                return
+
+            # Direct URL or local file
             content = None
             filename = source
             if source.startswith(("http://", "https://")):
@@ -394,12 +474,9 @@ Type your message, or `/help` for commands.""")
             parsed = parse_skill_markdown(content, filename=filename)
             try:
                 self.agent.memory.skill_add(
-                    name=parsed["name"],
-                    description=parsed["description"],
-                    steps=[],
-                    triggers=parsed["triggers"],
-                    tags=parsed["tags"],
-                    contract=parsed["contract"],
+                    name=parsed["name"], description=parsed["description"],
+                    steps=[], triggers=parsed["triggers"],
+                    tags=parsed["tags"], contract=parsed["contract"],
                 )
                 self.console.print(f"[bold green]Skill installed:[/] {parsed['name']} ({len(parsed['contract'])} chars contract)")
             except Exception as e:
