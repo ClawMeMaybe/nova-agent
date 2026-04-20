@@ -47,7 +47,7 @@ def _write_locked(method):
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS _meta (key TEXT UNIQUE, value TEXT);
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '8');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '9');
 
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS skills (
     success_rate REAL NOT NULL DEFAULT 0.5,
     usage_count INTEGER NOT NULL DEFAULT 0,
     tags TEXT NOT NULL DEFAULT '',
+    contract TEXT DEFAULT NULL,
     version INTEGER NOT NULL DEFAULT 1,
     last_improved_at TEXT NOT NULL DEFAULT '',
     needs_review INTEGER NOT NULL DEFAULT 0,
@@ -382,6 +383,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 UPDATE _meta SET value = '8' WHERE key = 'schema_version';
 """
 
+SCHEMA_V9_MIGRATION = """
+ALTER TABLE skills ADD COLUMN contract TEXT DEFAULT NULL;
+UPDATE _meta SET value = '9' WHERE key = 'schema_version';
+"""
+
 SCHEMA_SQL = SCHEMA_V1
 
 # ── Constants ──
@@ -616,6 +622,18 @@ class NovaMemory:
                 self._conn.commit()
             except Exception as e:
                 print(f"[Migration] V8 migration error: {e}")
+
+        if current_version < 9:
+            # V9: Add contract column to skills table for behavioral contracts
+            try:
+                cols = [r[1] for r in self._conn.execute("PRAGMA table_info(skills)").fetchall()]
+                if 'contract' not in cols:
+                    self._conn.execute("ALTER TABLE skills ADD COLUMN contract TEXT DEFAULT NULL")
+                    self._conn.commit()
+                self._conn.execute("UPDATE _meta SET value='9' WHERE key='schema_version'")
+                self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V9 migration error: {e}")
 
     def _seed_defaults(self):
         if self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE slug='meta-rules'").fetchone()[0] == 0:
@@ -1325,21 +1343,22 @@ class NovaMemory:
     @_write_locked
     def skill_add(self, name: str, description: str, steps: list,
                   tags: str = '', success_rate: float = 0.5,
-                  triggers: str = '', pitfalls: list = None) -> int:
+                  triggers: str = '', pitfalls: list = None,
+                  contract: str = None) -> int:
         steps_json = json.dumps(steps, ensure_ascii=False)
         pitfalls_json = json.dumps(pitfalls or [], ensure_ascii=False)
         now = datetime.now().isoformat()
         try:
             cur = self._conn.execute(
-                "INSERT INTO skills (name,description,steps,triggers,pitfalls,success_rate,tags,project_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (name, description, steps_json, triggers, pitfalls_json, success_rate, tags, self._scope_write_id(), now, now)
+                "INSERT INTO skills (name,description,steps,triggers,pitfalls,success_rate,tags,project_id,contract,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (name, description, steps_json, triggers, pitfalls_json, success_rate, tags, self._scope_write_id(), contract, now, now)
             )
             self._conn.commit()
             return cur.lastrowid
         except sqlite3.IntegrityError:
             self._conn.execute(
-                "UPDATE skills SET steps=?, triggers=?, pitfalls=?, success_rate=?, tags=?, version=version+1, last_improved_at=?, updated_at=? WHERE name=?",
-                (steps_json, triggers, pitfalls_json, success_rate, tags, now, now, name)
+                "UPDATE skills SET steps=?, triggers=?, pitfalls=?, success_rate=?, tags=?, contract=?, version=version+1, last_improved_at=?, updated_at=? WHERE name=?",
+                (steps_json, triggers, pitfalls_json, success_rate, tags, contract, now, now, name)
             )
             self._conn.commit()
             return self._conn.execute("SELECT id FROM skills WHERE name=?", (name,)).fetchone()[0]

@@ -99,6 +99,7 @@ class NovaAgent:
         global_db = os.path.join(HOME_DIR, '.nova', 'nova.db')
         self.memory = NovaMemory(global_db)
         self.current_project_id = None
+        self._register_builtin_skills()
         self.lock = threading.Lock()
         self.task_dir = os.path.join(HOME_DIR, '.nova', 'temp')
         os.makedirs(self.task_dir, exist_ok=True)
@@ -116,6 +117,20 @@ class NovaAgent:
     def is_running(self):
         """Thread-safe read of agent busy state."""
         return self._busy.is_set()
+
+    def _register_builtin_skills(self):
+        """Auto-register built-in command contract skills."""
+        from nova.brainstorm import build_brainstorm_prompt
+        try:
+            self.memory.skill_add(
+                name="brainstorm",
+                description="Socratic interview with mathematical ambiguity scoring for crystallizing ideas into specs",
+                steps=[], triggers="brainstorm,socratic,interview,ambiguity,spec,clarify",
+                tags="brainstorm,contract,command",
+                contract=build_brainstorm_prompt(None)
+            )
+        except Exception:
+            pass  # Skill already exists (UPSERT handles it, but just in case)
 
     def abort(self):
         if not self._busy.is_set():
@@ -162,16 +177,21 @@ class NovaAgent:
             if skill_matches:
                 skill_context = "\n[Relevant Skills — proven workflows for this task]\n"
                 for sk in skill_matches:
-                    scope = 'global' if sk.get('project_id') is None else 'project'
-                    skill_context += f"  **{sk['name']}** (v{sk.get('version', 1)}, success: {sk['success_rate']:.0%}) [{scope}]\n"
-                    skill_context += f"    Triggers: {sk.get('triggers', '')}\n"
-                    for step in sk['steps'][:4]:
-                        skill_context += f"    {step}\n"
-                    if len(sk['steps']) > 4:
-                        skill_context += f"    ... ({len(sk['steps']) - 4} more steps)\n"
-                    pitfalls = sk.get('pitfalls', [])
-                    if pitfalls:
-                        skill_context += f"    Pitfalls: {'; '.join(pitfalls[:2])}\n"
+                    if sk.get('contract'):
+                        skill_context += f"\n[Contract Skill — {sk['name']}]\n"
+                        skill_context += sk['contract']
+                        skill_context += f"\n[End Contract Skill]\n"
+                    else:
+                        scope = 'global' if sk.get('project_id') is None else 'project'
+                        skill_context += f"  **{sk['name']}** (v{sk.get('version', 1)}, success: {sk['success_rate']:.0%}) [{scope}]\n"
+                        skill_context += f"    Triggers: {sk.get('triggers', '')}\n"
+                        for step in sk['steps'][:4]:
+                            skill_context += f"    {step}\n"
+                        if len(sk['steps']) > 4:
+                            skill_context += f"    ... ({len(sk['steps']) - 4} more steps)\n"
+                        pitfalls = sk.get('pitfalls', [])
+                        if pitfalls:
+                            skill_context += f"    Pitfalls: {'; '.join(pitfalls[:2])}\n"
                 skill_context += "  Use these steps as a guide — adapt to your specific situation.\n"
                 user_input = skill_context + "\n\n" + user_input
 

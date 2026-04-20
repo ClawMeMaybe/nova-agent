@@ -767,25 +767,34 @@ class NovaHandler(BaseHandler):
     # ── Skill Tools ──
 
     def do_skill_add(self, args, response):
-        """Crystallize a repeatable workflow into a skill/SOP."""
+        """Crystallize a repeatable workflow into a skill/SOP, or install a contract skill."""
         name = args.get("name", "")
         description = args.get("description", "")
         steps = args.get("steps", [])
         triggers = args.get("triggers", "")
         pitfalls = args.get("pitfalls", [])
         tags = args.get("tags", "")
+        contract = args.get("contract", None)
 
-        if not name or not steps or not triggers:
-            return StepOutcome({"status": "error", "msg": "name, steps, and triggers are required"}, next_prompt="\n")
+        if not name or not triggers:
+            if not name:
+                return StepOutcome({"status": "error", "msg": "name is required"}, next_prompt="\n")
+            return StepOutcome({"status": "error", "msg": "name and triggers are required"}, next_prompt="\n")
+
+        # Contract skills may have empty steps
+        if not steps and not contract:
+            return StepOutcome({"status": "error", "msg": "steps or contract is required"}, next_prompt="\n")
 
         try:
             skill_id = self.memory.skill_add(
                 name, description, steps,
-                tags=tags, triggers=triggers, pitfalls=pitfalls
+                tags=tags, triggers=triggers, pitfalls=pitfalls,
+                contract=contract
             )
+            contract_info = f" Contract: {len(contract)} chars." if contract else ""
             result = {
                 "status": "success",
-                "msg": f"Skill '{name}' created (id={skill_id}, version=1). Triggers: {triggers}. Steps: {len(steps)}. Pitfalls: {len(pitfalls)}.",
+                "msg": f"Skill '{name}' created (id={skill_id}, version=1). Triggers: {triggers}. Steps: {len(steps)}. Pitfalls: {len(pitfalls)}.{contract_info}",
                 "skill_id": skill_id,
             }
         except Exception as e:

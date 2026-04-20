@@ -21,6 +21,7 @@ from nova import __version__
 from nova.events import AgentEvent, EventBus
 from nova.main import build_learn_prompt
 from nova.brainstorm import build_brainstorm_prompt
+from nova.skill_parser import parse_skill_markdown
 from nova.tui.styles.theme import get_color
 
 logger = logging.getLogger("nova")
@@ -36,6 +37,7 @@ COMMANDS = {
     "/evolve": "Show evolution score",
     "/learn": "Learn about current project directory and generate knowledge",
     "/brainstorm": "Socratic interview with ambiguity scoring",
+    "/skill-install": "Install a skill from .md file or URL",
     "/help": "Show available commands",
 }
 
@@ -359,6 +361,51 @@ Type your message, or `/help` for commands.""")
                     self.console.print(f"[bold]Sync complete![/] Facts: {stats['total_facts']} | Skills: {stats['total_skills']} | Wiki: {stats['total_wiki_pages']}")
                     break
             return
+        if cmd.startswith("/skill-install"):
+            source = cmd[len("/skill-install"):].strip()
+            if not source:
+                self.console.print("[bold]Usage:[/] /skill-install <file_path_or_url>")
+                return
+
+            content = None
+            filename = source
+            if source.startswith(("http://", "https://")):
+                try:
+                    import urllib.request
+                    resp = urllib.request.urlopen(source, timeout=15)
+                    content = resp.read().decode("utf-8")
+                    filename = source.rsplit("/", 1)[-1] or "remote-skill"
+                except Exception as e:
+                    self.console.print(f"[bold red]Error fetching URL:[/] {e}")
+                    return
+            else:
+                path = os.path.expanduser(source)
+                if not os.path.isfile(path):
+                    self.console.print(f"[bold red]File not found:[/] {path}")
+                    return
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    filename = os.path.basename(path)
+                except Exception as e:
+                    self.console.print(f"[bold red]Error reading file:[/] {e}")
+                    return
+
+            parsed = parse_skill_markdown(content, filename=filename)
+            try:
+                self.agent.memory.skill_add(
+                    name=parsed["name"],
+                    description=parsed["description"],
+                    steps=[],
+                    triggers=parsed["triggers"],
+                    tags=parsed["tags"],
+                    contract=parsed["contract"],
+                )
+                self.console.print(f"[bold green]Skill installed:[/] {parsed['name']} ({len(parsed['contract'])} chars contract)")
+            except Exception as e:
+                self.console.print(f"[bold red]Error installing skill:[/] {e}")
+            return
+
         user_color = get_color("user-msg")
         self.console.print(f"[bold {user_color}]You:[/] {cmd}")
         self.agent.put_task(cmd, source="user")
