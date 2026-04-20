@@ -17,6 +17,7 @@ from rich.text import Text
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
 
 from nova import __version__
 from nova.events import AgentEvent, EventBus
@@ -69,10 +70,18 @@ class NovaApp:
 
         # REPL loop with prompt_toolkit
         completer = WordCompleter(list(COMMANDS.keys()))
+        key_bindings = KeyBindings()
+        @key_bindings.add('escape')
+        def _(event):
+            if self.agent.is_running:
+                self.agent.abort()
+                self.console.print("[grey50]Aborting current task...[/]")
+                event.app.exit(result='')
         session = PromptSession(
             history=InMemoryHistory(),
             completer=completer,
             multiline=False,
+            key_bindings=key_bindings,
         )
 
         while self._running:
