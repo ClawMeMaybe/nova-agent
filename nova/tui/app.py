@@ -20,6 +20,7 @@ from prompt_toolkit.history import InMemoryHistory
 from nova import __version__
 from nova.events import AgentEvent, EventBus
 from nova.main import build_learn_prompt
+from nova.brainstorm import build_brainstorm_prompt
 from nova.tui.styles.theme import get_color
 
 logger = logging.getLogger("nova")
@@ -34,6 +35,7 @@ COMMANDS = {
     "/todo": "Show autonomous TODO",
     "/evolve": "Show evolution score",
     "/learn": "Learn about current project directory and generate knowledge",
+    "/brainstorm": "Socratic interview with ambiguity scoring",
     "/help": "Show available commands",
 }
 
@@ -300,6 +302,27 @@ Type your message, or `/help` for commands.""")
                         )
             except Exception:
                 pass
+            return
+
+        if cmd.startswith("/brainstorm"):
+            topic = cmd[len("/brainstorm"):].strip() or None
+            if topic:
+                self.console.print(f"[bold]Brainstorm:[/] {topic}")
+            else:
+                self.console.print("[bold]Brainstorm Mode[/] — Socratic interview with ambiguity scoring")
+            brainstorm_prompt = build_brainstorm_prompt(topic)
+            dq = self.agent.put_task(brainstorm_prompt, source="user")
+            while True:
+                self._flush_events()
+                try:
+                    item = dq.get(timeout=0.5)
+                except queue.Empty:
+                    if not self.agent.is_running:
+                        break
+                    continue
+                if 'done' in item:
+                    self.console.print("[bold]Brainstorm complete![/] Spec saved to memory.")
+                    break
             return
 
         if cmd == "/learn":
