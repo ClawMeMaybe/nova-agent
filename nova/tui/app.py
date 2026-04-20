@@ -26,6 +26,8 @@ logger = logging.getLogger("nova")
 
 COMMANDS = {
     "/quit": "Exit Nova Agent",
+    "/exit": "Exit Nova Agent",
+    "/q": "Exit Nova Agent",
     "/stats": "Show memory statistics",
     "/wiki": "List wiki pages",
     "/cron": "List cron jobs",
@@ -231,7 +233,7 @@ Type your message, or `/help` for commands.""")
 
     def _handle_command(self, cmd):
         """Handle /commands."""
-        if cmd == "/quit":
+        if cmd in ("/quit", "/exit", "/q"):
             self._running = False
             return
 
