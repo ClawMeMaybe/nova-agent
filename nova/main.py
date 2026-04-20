@@ -28,25 +28,29 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 HOME_DIR = os.path.expanduser('~')
 
 
+LEARN_QUALITY_GUIDELINES = (
+    "# LEARN MODE — Project Knowledge Generation\n\n"
+    "Generate structured project knowledge from project scan data.\n"
+    "Follow these quality guidelines:\n\n"
+    "**Facts** — must be actionable with specific values, not just descriptions:\n"
+    "  Good: 'Gateway module connects to OpenClaw devices on WebSocket port 18789, supports loopback/LAN bindings'\n"
+    "  Bad: 'Backend has a gateway module'\n"
+    "  Include: ports, paths, commands, thresholds, version numbers, config values\n\n"
+    "**Wiki pages** — must include concrete details:\n"
+    "  Include: tables with routes/components, file paths, configuration values, build commands, framework versions\n\n"
+    "**Skills** — must have imperative steps with specific commands:\n"
+    "  Good: '1. npm run build --workspace=@clawmemaybe/shared' (specific command)\n"
+    "  Bad: '1. Build the project' (vague)\n"
+    "  Include: pitfalls with concrete failure modes\n\n"
+    "**Dedup**: Before creating each knowledge item, search existing knowledge (fact_search, wiki_query, skill_search) "
+    "to check if similar knowledge already exists. Skip creating items that are already well-covered.\n\n"
+    "When scan data is provided, create facts, wiki pages, and skills about the project. Prioritize actionable knowledge."
+)
+
+
 def build_learn_prompt(scan):
-    """Build a structured learn prompt with quality guidelines and examples."""
-    prompt = (
-        "Generate structured project knowledge from the scan data below.\n"
-        "Follow these quality guidelines:\n\n"
-        "**Facts** — must be actionable with specific values, not just descriptions:\n"
-        "  Good: 'Gateway module connects to OpenClaw devices on WebSocket port 18789, supports loopback/LAN bindings'\n"
-        "  Bad: 'Backend has a gateway module'\n"
-        "  Include: ports, paths, commands, thresholds, version numbers, config values\n\n"
-        "**Wiki pages** — must include concrete details:\n"
-        "  Include: tables with routes/components, file paths, configuration values, build commands, framework versions\n\n"
-        "**Skills** — must have imperative steps with specific commands:\n"
-        "  Good: '1. npm run build --workspace=@clawmemaybe/shared' (specific command)\n"
-        "  Bad: '1. Build the project' (vague)\n"
-        "  Include: pitfalls with concrete failure modes\n\n"
-        "**Dedup**: Before creating each knowledge item, search existing knowledge (fact_search, wiki_query, skill_search) "
-        "to check if similar knowledge already exists. Skip creating items that are already well-covered.\n\n"
-        "Here is the scan data:\n\n"
-    )
+    """Build a learn prompt: quality guidelines (from contract) + dynamic scan data."""
+    prompt = LEARN_QUALITY_GUIDELINES + "\n\nHere is the scan data:\n\n"
 
     # Core scan fields
     prompt += f"Project: {scan['project_name']}\n"
@@ -69,7 +73,6 @@ def build_learn_prompt(scan):
     if scan['ci_configs']:
         prompt += f"\n## CI Configs\n{scan['ci_configs'][:2000]}\n"
 
-    prompt += "\nCreate facts, wiki pages, and skills about this project. Prioritize actionable knowledge."
     return prompt
 
 
@@ -131,6 +134,16 @@ class NovaAgent:
             )
         except Exception:
             pass  # Skill already exists (UPSERT handles it, but just in case)
+        try:
+            self.memory.skill_add(
+                name="learn",
+                description="Project knowledge generation — scan a project directory and create facts, wiki pages, and skills",
+                steps=[], triggers="learn,scan,project,knowledge,analyze,digest",
+                tags="learn,contract,command",
+                contract=LEARN_QUALITY_GUIDELINES
+            )
+        except Exception:
+            pass
 
     def abort(self):
         if not self._busy.is_set():
