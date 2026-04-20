@@ -2104,6 +2104,9 @@ class NovaMemory:
             project_wiki = self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
         total_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         global_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions WHERE project_id IS NULL").fetchone()[0]
+        project_sessions = 0
+        if self.current_project_id:
+            project_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
         avg_trust = self._conn.execute("SELECT AVG(trust_score) FROM facts").fetchone()[0] or 0
         return {
             'total_facts': total_facts,
@@ -2117,6 +2120,7 @@ class NovaMemory:
             'project_wiki_pages': project_wiki,
             'total_sessions': total_sessions,
             'global_sessions': global_sessions,
+            'project_sessions': project_sessions,
             'avg_trust': avg_trust,
             'evolution_score': ev_score,
             'evolution_trend': ev_trend,

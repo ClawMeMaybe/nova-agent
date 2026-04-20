@@ -107,7 +107,7 @@ class NovaApp:
         banner = Markdown(f"""**Nova Agent v{__version__}** — Self-evolving AI assistant
 
 - Model: {model_name}
-- Local: {stats['local_wiki_pages']} wiki | {stats['local_facts']} facts | {stats['local_skills']} skills
+- Local: {stats['project_wiki_pages']} wiki | {stats['project_facts']} facts | {stats['project_skills']} skills
 - Global: {stats['global_wiki_pages']} wiki | {stats['global_facts']} facts | {stats['global_skills']} skills
 
 Type your message, or `/help` for commands.""")
@@ -252,8 +252,8 @@ Type your message, or `/help` for commands.""")
 
         if cmd == "/stats":
             stats = self.agent.memory.stats()
-            self.console.print(f"[bold]Local:[/] Wiki: {stats['local_wiki_pages']} | Facts: {stats['local_facts']} | Skills: {stats['local_skills']} | Sessions: {stats['local_sessions']} | Trust: {stats['local_avg_trust']:.2f}")
-            self.console.print(f"[bold]Global:[/] Wiki: {stats['global_wiki_pages']} | Facts: {stats['global_facts']} | Skills: {stats['global_skills']} | Sessions: {stats['global_sessions']} | Trust: {stats['global_avg_trust']:.2f}")
+            self.console.print(f"[bold]Local:[/] Wiki: {stats['project_wiki_pages']} | Facts: {stats['project_facts']} | Skills: {stats['project_skills']} | Sessions: {stats['project_sessions']} | Trust: {stats['avg_trust']:.2f}")
+            self.console.print(f"[bold]Global:[/] Wiki: {stats['global_wiki_pages']} | Facts: {stats['global_facts']} | Skills: {stats['global_skills']} | Sessions: {stats['global_sessions']} | Trust: {stats['avg_trust']:.2f}")
             return
 
         if cmd == "/wiki":
