@@ -26,6 +26,7 @@ dependencies = [
     "croniter>=2.0",
     "prompt_toolkit>=3.0",
     "rich>=13.0.0",
+    "markdown2>=2.4",
 ]
 
 [project.optional-dependencies]
@@ -69,6 +70,7 @@ nova-feishu = "nova.gateway.feishu:main"
 nova-qq = "nova.gateway.qq:main"
 nova-dingtalk = "nova.gateway.dingtalk:main"
 nova-web = "nova.gateway.webhook:main_minimal"
+nova-wiki = "nova.gateway.wiki:main"
 nova-schedule = "nova.scheduler:cli"
 
 [tool.setuptools.packages.find]
