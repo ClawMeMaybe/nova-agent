@@ -203,12 +203,12 @@ Type your message, or `/help` for commands.""")
         elif seconds < 3600:
             m = int(seconds // 60)
             s = int(seconds % 60)
-            return f"{m}m{s:02d}s"
+            return f"{m}m {s:02d}s"
         else:
             h = int(seconds // 3600)
             m = int((seconds % 3600) // 60)
             s = int(seconds % 60)
-            return f"{h}h{m:02d}m{s:02d}s"
+            return f"{h}h {m:02d}m {s:02d}s"
 
     def _extract_primary_arg(self, summary, limit=100):
         """Parse tool call summary JSON and extract the most meaningful field.
