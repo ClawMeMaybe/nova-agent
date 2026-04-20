@@ -120,7 +120,9 @@ def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
     """Read file content with line numbers, keyword search, and smart truncation."""
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
-            stream = ((i, l.rstrip('\r\n')) for i, l in enumerate(f, 1))
+            all_lines = f.readlines()
+            total_lines = len(all_lines)
+            stream = ((i, l.rstrip('\r\n')) for i, l in enumerate(all_lines, 1))
             stream = itertools.dropwhile(lambda x: x[0] < start, stream)
             if keyword:
                 before = collections.deque(maxlen=count // 3)
@@ -130,11 +132,17 @@ def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
                         break
                     before.append((i, l))
                 else:
-                    return f"Keyword '{keyword}' not found after line {start}."
+                    return f"Keyword '{keyword}' not found after line {start}. (File has {total_lines} lines total)"
             else:
                 res = list(itertools.islice(stream, count))
 
             result = "\n".join(f"{i}|{l}" if show_linenos else l for i, l in res)
+            # Add total line count footer to prevent re-reading for context
+            end_line = res[-1][0] if res else start
+            if end_line < total_lines:
+                result += f"\n--- showing lines {start}-{end_line} of {total_lines} total ---"
+            elif total_lines > 0:
+                result += f"\n--- {total_lines} lines total, all shown ---"
             return result
     except FileNotFoundError:
         return f"File not found: {path}"
@@ -694,6 +702,40 @@ class NovaHandler(BaseHandler):
         except Exception as e:
             result = {"status": "error", "msg": str(e)}
 
+        # Enrich SQL errors with available columns and SQLite dialect hints to prevent zig-zag re-queries
+        # NOTE: safe_query catches errors internally, so enrichment must check the result dict
+        if result.get('status') == 'error':
+            error_msg = result.get('msg', '')
+            enrichments = []
+            if 'no such column' in error_msg.lower():
+                # Extract table name from the SQL and show available columns
+                table_match = re.search(r'FROM\s+(\w+)', sql, re.IGNORECASE)
+                if table_match:
+                    table_name = table_match.group(1)
+                    try:
+                        cols = self.memory._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                        col_names = [c['name'] for c in cols]
+                        enrichments.append(f"Available columns in {table_name}: {', '.join(col_names)}")
+                    except Exception:
+                        pass
+            if 'no such function' in error_msg.lower():
+                func_match = re.search(r'no such function:\s*(\w+)', error_msg, re.IGNORECASE)
+                if func_match:
+                    fn = func_match.group(1)
+                    sqlite_hints = {
+                        'LEFT': 'Use substr(col, 1, N) instead of LEFT(col, N)',
+                        'RIGHT': 'Use substr(col, -N) instead of RIGHT(col, N)',
+                        'IF': 'Use CASE WHEN ... THEN ... ELSE ... END instead of IF()',
+                        'GROUP_CONCAT': 'Use json_group_array() or string_agg alternatives',
+                        'DATE_ADD': 'Use date(col, "+N days") instead',
+                    }
+                    if fn.upper() in sqlite_hints:
+                        enrichments.append(f"SQLite dialect hint: {sqlite_hints[fn.upper()]}")
+                    else:
+                        enrichments.append(f"SQLite does not have function '{fn}'. Use substr(), CASE, or check db_schema.")
+            if enrichments:
+                result['hints'] = enrichments
+
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
 
@@ -702,6 +744,26 @@ class NovaHandler(BaseHandler):
 
         try:
             result = self.memory.get_schema_info()
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_knowledge_reset(self, args, response):
+        """Delete ALL knowledge from the database. Irreversible — only use for a fresh start."""
+
+        confirm = args.get("confirm", False)
+        if not confirm:
+            return StepOutcome(
+                {"status": "error", "msg": "knowledge_reset is irreversible. Set confirm=true to proceed."},
+                next_prompt="\n"
+            )
+
+        try:
+            counts = self.memory.knowledge_reset()
+            total = sum(v for v in counts.values() if isinstance(v, int))
+            result = {"status": "success", "msg": f"Knowledge reset complete. {total} items deleted.", "counts": counts}
         except Exception as e:
             result = {"status": "error", "msg": str(e)}
 
@@ -1176,7 +1238,31 @@ class NovaHandler(BaseHandler):
         if len(code_blocks) == 1:
             return StepOutcome({}, next_prompt="[System] Detected code block without tool call. Please use code_run, file_write, or file_patch to execute it.")
 
-        return StepOutcome(response, next_prompt=None)
+        # BUG FIX: "Instant done" — on the first turn with no real tool calls yet,
+        # a text-only response causes next_prompt=None → CURRENT_TASK_DONE exit in
+        # agent_loop.py line 135-137. The LLM hasn't done any work yet, so this is
+        # always wrong. After real work has been done (history_info has tool call
+        # entries), allow the natural exit — the LLM is genuinely done.
+        has_done_work = any(
+            'Called ' in h or h.startswith('[Turn')
+            for h in self.history_info
+            if 'no_tool' not in h.lower() and 'Direct text' not in h
+        )
+
+        if not has_done_work:
+            # First-turn text-only response — the "instant done" bug.
+            # Nudge the LLM to continue working with tools instead of exiting.
+            return StepOutcome(
+                response,
+                next_prompt="[System] Text-only response received before any tool use. "
+                            "Continue working on the task — use appropriate tools to "
+                            "investigate, execute, or verify. Do not just describe what "
+                            "you would do; actually do it using tools."
+            )
+        else:
+            # After doing real work, a text-only response likely means the task is
+            # genuinely complete. Allow the loop to exit naturally.
+            return StepOutcome(response, next_prompt=None)
 
     # ── Turn end ──
 
@@ -1191,13 +1277,60 @@ class NovaHandler(BaseHandler):
             if tool_name == 'no_tool':
                 summary = "Direct text response"
             else:
-                summary = f"Called {tool_name}"
+                # Include result summary to prevent zig-zag — agent needs to see what happened
+                result_summary = ""
+                if tool_results:
+                    raw = tool_results[0].get('content', '')
+                    # Try to extract key info from JSON results
+                    try:
+                        data = json.loads(raw)
+                        if isinstance(data, dict):
+                            status = data.get('status', '')
+                            msg = data.get('msg', '')
+                            stdout = data.get('stdout', '')
+                            if status == 'error':
+                                result_summary = f" → error: {msg[:50]}"
+                            elif msg:
+                                result_summary = f" → {msg[:50]}"
+                            elif stdout:
+                                result_summary = f" → {stdout[:50]}"
+                            else:
+                                # For lists or other data, show count or first item
+                                result_summary = f" → {json.dumps(data)[:50]}"
+                    except (json.JSONDecodeError, TypeError):
+                        result_summary = f" → {raw[:50]}"
+                summary = f"Called {tool_name}{result_summary}"
 
-        summary = smart_format(summary, max_str_len=100)
+        summary = smart_format(summary, max_str_len=150)
         self.history_info.append(f'[Agent] {summary}')
 
-        if turn % 7 == 0:
-            next_prompt += f"\n[DANGER] Turn {turn}: If no progress, switch strategy or ask_user."
+        # Context-aware DANGER: detect zig-zag patterns and stalled loops
+        recent = self.history_info[-8:]
+        
+        # Pattern 1: calls without visible results (original)
+        tool_only = [h for h in recent if 'Called ' in h and '→' not in h]
+        if turn >= 7 and len(tool_only) >= 3:
+            next_prompt += f"\n[DANGER] Turn {turn}: {len(tool_only)} calls without visible results. Switch strategy or ask_user."
+        
+        # Pattern 2: repeated same-tool zig-zag (e.g., file_read → file_patch → file_read)
+        recent_tools = []
+        for h in recent:
+            m = re.match(r'\[Agent\] Called (\w+)', h)
+            if m:
+                recent_tools.append(m.group(1))
+        if len(recent_tools) >= 6:
+            # Check for alternating pattern: same 2-3 tools cycling
+            from collections import Counter
+            tool_counts = Counter(recent_tools[-6:])
+            dominant_tools = [t for t, c in tool_counts.items() if c >= 2]
+            if len(dominant_tools) >= 2 and len(dominant_tools) <= 3:
+                next_prompt += f"\n[DANGER] Turn {turn}: Zig-zag detected — cycling between {', '.join(dominant_tools)}. Batch your operations: read all needed context first, then apply all changes. Switch strategy or ask_user."
+        
+        # Pattern 3: repeated db_query refinement (SQL errors → re-query loops)
+        db_calls = [h for h in recent if 'Called db_query' in h]
+        db_errors = [h for h in db_calls if '→ error' in h]
+        if len(db_errors) >= 2:
+            next_prompt += f"\n[DANGER] Turn {turn}: {len(db_errors)} db_query errors in recent turns. Check db_schema first, use substr() not LEFT(), and query broadly rather than narrowly."
 
         # Trust decay on session end (lightweight maintenance)
         if exit_reason:

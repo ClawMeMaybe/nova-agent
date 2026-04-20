@@ -195,11 +195,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
 
     if exit_reason:
         handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
-        # Emit completion events for TUI
         if handler.events:
-            response_text = getattr(response, 'content', '') or ''
-            if response_text:
-                handler.events.emit(AgentEvent.AGENT_RESPONSE, response_text)
             handler.events.emit(AgentEvent.AGENT_DONE, {"result": exit_reason.get('result', 'UNKNOWN')})
     elif not exit_reason:
         if handler.events:
