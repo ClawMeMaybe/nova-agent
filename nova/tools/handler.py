@@ -281,6 +281,12 @@ class NovaHandler(BaseHandler):
         """Ask the user a question — human-in-the-loop."""
         question = args.get("question", "Please provide input:")
         candidates = args.get("candidates", [])
+        # LLMs may pass candidates as a string instead of a list — parse defensively
+        if isinstance(candidates, str):
+            try:
+                candidates = json.loads(candidates)
+            except (json.JSONDecodeError, TypeError):
+                candidates = [candidates]
 
         # Emit event for TUI dialog — agent waits for response
         if self.events:

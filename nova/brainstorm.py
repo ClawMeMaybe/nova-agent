@@ -1,13 +1,15 @@
-"""Nova Brainstorm — Socratic interview with mathematical ambiguity scoring.
+"""Nova Brainstorm — Socratic interview with structured choices and progress display.
 
-Builds the prompt that drives a multi-round interview session,
-enforcing weighted dimension scoring, challenge agent modes,
-ontology tracking, and spec crystallization via wiki_ingest.
+Builds the prompt that drives a focused interview session with:
+- Structured choices via ask_user candidates (not open-ended questions)
+- "Recommended" labels on best-fit options
+- Round number and ambiguity score progress after each answer
+- Shorter max rounds (6) with earlier exit (ambiguity ≤ 0.30)
 """
 
 
 def build_brainstorm_prompt(topic=None):
-    """Build the brainstorm interview prompt with ambiguity scoring protocol.
+    """Build the brainstorm interview prompt with structured choices protocol.
 
     Args:
         topic: The brainstorm topic/idea. If None, LLM asks user via ask_user first.
@@ -15,103 +17,114 @@ def build_brainstorm_prompt(topic=None):
     Returns:
         Complete prompt string for the brainstorm session.
     """
-    prompt = """# BRAINSTORM MODE — Socratic Interview with Ambiguity Scoring
+    prompt = """# BRAINSTORM MODE — Structured Interview with Progress Display
 
-You are conducting a structured Socratic interview to crystallize a vague idea into a clear specification. You must follow this protocol exactly across all rounds.
+You are conducting a focused Socratic interview to crystallize a vague idea into a clear specification. You MUST follow this protocol exactly.
+
+## CORE RULE: STRUCTURED CHOICES, NOT OPEN QUESTIONS
+
+Every question MUST use `ask_user` with `candidates` — NEVER ask open-ended questions.
+
+Format your ask_user calls like this:
+```
+ask_user(question="Round {n}: {question text}", candidates=["★ Recommended: {best option} — {reason}", "{option 2} — {reason}", "{option 3} — {reason}", "Custom (type your own)"])
+```
+
+Rules for candidates:
+- Always provide 3-4 candidates (including "Custom" as last option)
+- ONE candidate starts with "★ Recommended:" — this is your best-fit suggestion
+- Each candidate includes a brief reason after " — "
+- The recommended option should be informed by your analysis and the weakest dimension
+- "Custom" option allows the user to deviate if they have a specific idea
 
 ## Interview Protocol
 
 ### Round Flow
-1. Ask ONE question per round — never batch multiple questions
-2. Target the WEAKEST clarity dimension with each question
+1. Show progress header (round number, ambiguity score, weakest dimension)
+2. Ask ONE question using ask_user with structured candidates
 3. After each answer, score ambiguity across all dimensions
-4. Display the score table after each round
+4. Display the score table with progress indicator
 5. Continue until exit condition is met
+
+### Progress Header Format
+Before each question, display:
+```
+─── Round {n}/{max_rounds} │ Ambiguity: {score}% │ Weakest: {dimension} ───
+```
 
 ### Dimension Scoring
 Score each dimension from 0.0 to 1.0 after every answer:
 
-| Dimension | Weight | Question Style |
-|-----------|--------|---------------|
-| Goal Clarity | 35% | "What exactly happens when...?" — Is the objective unambiguous? |
-| Constraint Clarity | 25% | "What are the boundaries?" — Are limits and non-goals clear? |
-| Success Criteria | 25% | "How do we know it works?" — Can you write a test for success? |
-| Context Clarity | 15% | "How does this fit?" — Do we understand the existing system? |
+| Dimension | Weight | Description |
+|-----------|--------|-------------|
+| Goal Clarity | 35% | Is the objective unambiguous? |
+| Constraint Clarity | 25% | Are limits and non-goals clear? |
+| Success Criteria | 25% | Can you write a test for success? |
+| Context Clarity | 15% | Do we understand the existing system? |
 
-### Ambiguity Formula (brownfield)
+### Ambiguity Formula
 `ambiguity = 1 - (goal × 0.35 + constraints × 0.25 + criteria × 0.25 + context × 0.15)`
+`ambiguity_pct = round(ambiguity × 100)`
 
-Threshold: ambiguity ≤ 0.20 → interview complete, crystallize spec.
+Threshold: ambiguity ≤ 0.30 → interview complete, crystallize spec.
+Hard cap: Round 6 maximum.
 
-### Score Display Format
-After each round, display this table:
-
+### Score Display Format (show after every answer)
 ```
-Round {n} complete.
+📊 Round {n} complete. Ambiguity: {pct}% (was {prev_pct}% → {now_pct}%)
 
 | Dimension | Score | Weight | Weighted | Gap |
 |-----------|-------|--------|----------|-----|
-| Goal | {s} | 35% | {s×0.35} | {gap or "Clear"} |
-| Constraints | {s} | 25% | {s×0.25} | {gap or "Clear"} |
-| Success Criteria | {s} | 25% | {s×0.25} | {gap or "Clear"} |
-| Context | {s} | 15% | {s×0.15} | {gap or "Clear"} |
-| **Ambiguity** | | | **{1-total}** | |
-
-**Ontology:** {entity_count} entities | Stability: {ratio} | New: {n} | Stable: {s}
-**Next target:** {weakest_dimension} — {rationale}
+| Goal | {s} | 35% | {s×0.35} | {gap or "✓"} |
+| Constraints | {s} | 25% | {s×0.25} | {gap or "✓"} |
+| Success Criteria | {s} | 25% | {s×0.25} | {gap or "✓"} |
+| Context | {s} | 15% | {s×0.15} | {gap or "✓"} |
 ```
 
-### Scoring Example
-Here is an example of correct scoring output:
+### Example Round
+
+Round 1 — Goal Clarity (starting dimension):
 
 ```
-Round 2 complete.
+─── Round 1/6 │ Ambiguity: 100% │ Weakest: Goal ───
+
+ask_user(
+  question="Round 1: What is the PRIMARY outcome you want from this?",
+  candidates=[
+    "★ Recommended: Define a clear deliverable — projects without a concrete outcome drift",
+    "Explore and discover — no fixed target, let the process shape it",
+    "Solve a specific problem — I know what's broken, I need a fix",
+    "Custom (type your own)"
+  ]
+)
+```
+
+After user answers "Define a clear deliverable", show:
+```
+📊 Round 1 complete. Ambiguity: 65% (was 100% → 65%)
 
 | Dimension | Score | Weight | Weighted | Gap |
 |-----------|-------|--------|----------|-----|
-| Goal | 0.85 | 35% | 0.298 | Need to clarify user roles |
-| Constraints | 0.60 | 25% | 0.150 | No performance targets defined |
-| Success Criteria | 0.70 | 25% | 0.175 | Verification method unclear |
-| Context | 0.80 | 15% | 0.120 | Clear |
-| **Ambiguity** | | | **0.357** | |
-
-**Ontology:** 4 entities (User, Task, Dashboard, Filter) | Stability: 75% | New: 1 | Stable: 3
-**Next target:** Constraint Clarity — no performance or scale requirements yet
+| Goal | 0.35 | 35% | 0.123 | Need specifics on what deliverable |
+| Constraints | 0.15 | 25% | 0.038 | No boundaries defined yet |
+| Success Criteria | 0.10 | 25% | 0.025 | No verification method |
+| Context | 0.60 | 15% | 0.090 | ✓ |
 ```
 
-### Challenge Agent Modes
-Shift questioning perspective at specific rounds (use each mode exactly once):
-
-- **Round 4+: Contrarian Mode** — Challenge the user's core assumption.
-  "What if the opposite were true?" "What if this constraint doesn't actually exist?"
-
-- **Round 6+: Simplifier Mode** — Probe whether complexity can be removed.
-  "What's the simplest version that would still be valuable?" "Which constraints are assumed vs. necessary?"
-
-- **Round 8+: Ontologist Mode** (only if ambiguity still > 0.3) — Find the essence.
-  "What IS this, really?" "Which entity is the CORE concept?"
-
-### Ontology Tracking
-Extract key entities each round. For each entity provide:
-- name, type (core domain / supporting / external system)
-- fields (key attributes), relationships
-
-Track stability across rounds:
-- stable_entities: same name in both rounds
-- changed_entities: same type + >50% field overlap (renamed, not new)
-- new_entities: not matched by name or fuzzy-match
-- stability_ratio: (stable + changed) / total_entities
+### Challenge Modes (shift perspective)
+- **Round 3+: Contrarian** — Challenge the core assumption with a recommended counter-position
+- **Round 5+: Simplifier** — Recommend the simplest viable version
 
 ### Exit Conditions
-Stop the interview when ANY of these is met:
-1. Ambiguity ≤ 0.20 (threshold met)
-2. User says "done", "enough", "let's go", "build it", "that's enough" (early exit, allowed from round 3+)
-3. Round 10 reached (hard cap)
+Stop when ANY is met:
+1. Ambiguity ≤ 0.30 (threshold)
+2. User selects "Custom" and types "done", "enough", "build it", "let's go" (early exit from round 2+)
+3. Round 6 reached (hard cap)
 
-On early exit with ambiguity > 0.20, warn the user about unclear areas before proceeding.
+On early exit with ambiguity > 0.30, warn about unclear areas before proceeding.
 
 ### Spec Crystallization
-When the interview ends, produce a structured specification:
+When interview ends, produce:
 
 ```markdown
 # Brainstorm Spec: {title}
@@ -134,13 +147,6 @@ When the interview ends, produce a structured specification:
 | Assumption | Challenge | Resolution |
 |------------|-----------|------------|
 
-## Ontology (Key Entities)
-| Entity | Type | Fields | Relationships |
-
-## Ontology Convergence
-| Round | Entities | New | Changed | Stable | Stability |
-|-------|---------|-----|---------|--------|-----------|
-
 ## Clarity Breakdown
 | Dimension | Score | Weight | Weighted |
 |-----------|-------|--------|----------|
@@ -151,18 +157,17 @@ When the interview ends, produce a structured specification:
 | **Ambiguity** | | | **{1-total}** |
 ```
 
-Then persist this spec using:
+Then persist via:
 `wiki_ingest(title="Brainstorm Spec: {title}", content=<spec markdown>, tags="brainstorm,spec,{topic_keywords}", category="spec")
 
-## Protocol Checklist (reference each round)
-Before each question, verify:
-- [ ] Only ONE question this round
-- [ ] Question targets the WEAKEST dimension
-- [ ] State weakest dimension + rationale before the question
-- [ ] After answer: score all 4 dimensions, compute ambiguity, display table
-- [ ] Extract entities, compute stability ratio
-- [ ] Check exit conditions (ambiguity ≤ 0.20? user early exit? round 10?)
-- [ ] Check challenge mode thresholds (round 4→contrarian, 6→simplifier, 8→ontologist)
+## Protocol Checklist (verify each round)
+- [ ] Show progress header with round number and ambiguity
+- [ ] Use ask_user with candidates — ONE question with 3-4 structured choices
+- [ ] ONE candidate starts with "★ Recommended:" with reason
+- [ ] Include "Custom" as last candidate
+- [ ] After answer: score all 4 dimensions, compute ambiguity, display table with progress
+- [ ] Check exit conditions (≤0.30? early exit? round 6?)
+- [ ] Check challenge mode (round 3→contrarian, round 5→simplifier)
 
 """
 
@@ -172,13 +177,19 @@ Before each question, verify:
 ## Interview Topic
 The user wants to brainstorm about: "{topic}"
 
-Start the interview immediately. Announce the brainstorm, show initial ambiguity at 100%, and ask your first question targeting Goal Clarity (always the starting weakest dimension).
+Start immediately. Show the progress header for Round 1 and ask your first question targeting Goal Clarity with structured candidates.
 """
     else:
         prompt += """
 
 ## Interview Topic
-The user has not provided a specific topic. Use ask_user to ask: "What idea or problem would you like to brainstorm about?" Then begin the interview with their answer.
+Use ask_user to ask: "What idea or problem would you like to brainstorm about?" with candidates:
+- "★ Recommended: A project or feature I want to build — most common starting point"
+- "A problem I need to solve — something is broken or slow"
+- "An architecture or design decision — choosing between approaches"
+- "Custom (type your own)"
+
+Then begin the interview with their answer.
 """
 
     return prompt

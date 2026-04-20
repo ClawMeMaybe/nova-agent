@@ -40,7 +40,7 @@ COMMANDS = {
     "/learn": "Learn about current project directory and generate knowledge",
     "/brainstorm": "Socratic interview with ambiguity scoring",
     "/skill-install": "Install a skill from .md file or URL",
-    "/project": "List projects or switch scope (/project <name>)",
+    "/project": "List/switch projects, or /project new <name> for guided onboarding",
     "/verbose": "Show all tool output (read + action)",
     "/quiet": "Show only action tool output (default)",
     "/help": "Show available commands",
@@ -160,13 +160,18 @@ Type your message, or `/help` for commands.""")
                 self._tool_count += 1
 
     def _flush_events(self):
-        """Render all buffered events inline."""
+        """Render all buffered events inline. Returns ASK_USER events separately."""
         with self._event_lock:
             events = self._event_buffer[:]
             self._event_buffer.clear()
 
+        ask_events = []
         for event_type, data in events:
-            self._render_event(event_type, data)
+            if event_type == AgentEvent.ASK_USER:
+                ask_events.append(data)
+            else:
+                self._render_event(event_type, data)
+        return ask_events
 
     def _render_event(self, event_type, data):
         """Render a single event using Rich."""
@@ -235,9 +240,6 @@ Type your message, or `/help` for commands.""")
             muted = get_color("text-muted")
             self.console.print(f"[{muted}]{data}[/]", highlight=False)
 
-        elif event_type == AgentEvent.ASK_USER:
-            self._handle_ask_user(data)
-
     def _format_elapsed(self, seconds):
         """Format elapsed time with appropriate units: seconds, minutes, hours."""
         if seconds < 60:
@@ -285,26 +287,41 @@ Type your message, or `/help` for commands.""")
         """
         self._tool_count = 0
         start_time = time.monotonic()
+        done = False
 
-        with self.console.status("", spinner="dots") as status:
-            try:
-                while True:
-                    self._flush_events()
-                    elapsed = time.monotonic() - start_time
-                    phase = label if self._tool_count == 0 else f"{label} — running tools"
-                    tool_info = f" {self._tool_count} tools" if self._tool_count else ""
-                    status.update(f"[grey50]{phase}... ({self._format_elapsed(elapsed)}){tool_info}[/]")
-                    try:
-                        item = dq.get(timeout=0.5)
-                    except queue.Empty:
-                        if not self.agent.is_running:
+        while not done:
+            ask_events = []
+            with self.console.status("", spinner="dots") as status:
+                try:
+                    while True:
+                        ask_events = self._flush_events()
+                        elapsed = time.monotonic() - start_time
+                        phase = label if self._tool_count == 0 else f"{label} — running tools"
+                        tool_info = f" {self._tool_count} tools" if self._tool_count else ""
+                        status.update(f"[grey50]{phase}... ({self._format_elapsed(elapsed)}){tool_info}[/]")
+                        if ask_events:
+                            break  # Exit spinner to handle ask_user
+                        try:
+                            item = dq.get(timeout=0.5)
+                        except queue.Empty:
+                            if not self.agent.is_running:
+                                done = True
+                                break
+                            continue
+                        if 'done' in item:
+                            done = True
                             break
-                        continue
-                    if 'done' in item:
-                        break
-            except KeyboardInterrupt:
-                self.agent.abort()
-                self.console.print("[grey50]Aborting current task...[/]")
+                except KeyboardInterrupt:
+                    self.agent.abort()
+                    self.console.print("[grey50]Aborting current task...[/]")
+                    done = True
+
+            # Handle ask_user events outside spinner context (allows user input)
+            # Also flush any new events that arrived during the break
+            new_ask_events = self._flush_events()
+            ask_events.extend(new_ask_events)
+            for ask_data in ask_events:
+                self._handle_ask_user(ask_data)
 
         elapsed = time.monotonic() - start_time
         muted = get_color("text-muted")
@@ -319,21 +336,37 @@ Type your message, or `/help` for commands.""")
             return
         question = data.get("question", "Please provide input:")
         candidates = data.get("candidates", [])
+        # LLMs may pass candidates as a string instead of a list — parse defensively
+        if isinstance(candidates, str):
+            try:
+                candidates = json.loads(candidates)
+            except (json.JSONDecodeError, TypeError):
+                candidates = [candidates]
 
         self.console.print(f"\n[bold]{question}[/]")
 
         if candidates:
             for i, c in enumerate(candidates):
-                self.console.print(f"  {i+1}. {c}")
+                if c.startswith("★"):
+                    # Recommended option — strip marker, highlight
+                    label = c[1:].strip()
+                    self.console.print(f"  [cyan bold]{i+1}. ★ {label}[/]")
+                elif c.lower().startswith("custom"):
+                    self.console.print(f"  [dim]{i+1}. {c}[/]")
+                else:
+                    self.console.print(f"  {i+1}. {c}")
             try:
-                answer = PromptSession().prompt("Your answer: ")
-                # Try to match numeric input to candidate
+                answer = PromptSession().prompt("Your answer (1-{n}): ".format(n=len(candidates)))
+                # Strip Recommended marker from answer if present
                 try:
                     idx = int(answer) - 1
                     if 0 <= idx < len(candidates):
-                        answer = candidates[idx]
+                        raw = candidates[idx]
+                        answer = raw[1:].strip() if raw.startswith("★") else raw
                 except ValueError:
-                    pass
+                    # Free-text answer — also strip ★ if user typed it
+                    if answer.startswith("★"):
+                        answer = answer[1:].strip()
             except (EOFError, KeyboardInterrupt):
                 answer = "__timeout__"
         else:
@@ -364,10 +397,53 @@ Type your message, or `/help` for commands.""")
 
         if cmd.startswith("/project"):
             arg = cmd[len("/project"):].strip()
+
+            # /project new <name> — guided onboarding
+            if arg.startswith("new") or arg == "new":
+                name = arg[len("new"):].strip()
+                if not name:
+                    try:
+                        name = PromptSession().prompt("Project name: ")
+                    except (EOFError, KeyboardInterrupt):
+                        self.console.print("[grey50]Cancelled.[/]")
+                        return
+                name = name.strip()
+                if not name:
+                    self.console.print("[bold red]Project name required.[/]")
+                    return
+
+                projects = self.agent.memory.project_list()
+                existing = None
+                for p in projects:
+                    if p['name'] == name:
+                        existing = p
+                        break
+
+                if existing:
+                    self.agent.memory.project_select(existing['id'])
+                    self.agent.current_project_id = existing['id']
+                    self.console.print(f"[bold]Reusing existing project:[/] {name}")
+                else:
+                    pid = self.agent.memory.project_create(name, f"Created via /project new")
+                    self.agent.memory.project_select(pid)
+                    self.agent.current_project_id = pid
+                    self.console.print(f"[bold]Created project scope:[/] {name}")
+
+                brainstorm_prompt = build_brainstorm_prompt(f"{name} — project architecture and goals")
+                dq = self.agent.put_task(brainstorm_prompt, source="user")
+                self._wait_with_spinner(dq, label="Brainstorming", completion_msg="[bold]Project onboarding complete![/]")
+
+                stats = self.agent.memory.stats()
+                self.console.print(f"  {stats['current_project_name']} — Facts: {stats['project_facts']} | Skills: {stats['project_skills']} | Wiki: {stats['project_wiki_pages']}")
+                if stats['project_facts'] == 0 and stats['project_wiki_pages'] == 0:
+                    self.console.print("[yellow]No knowledge seeded yet. Try /learn to scan your codebase.[/]")
+                return
+
+            # /project — list or switch
             projects = self.agent.memory.project_list()
             if not arg:
                 if not projects:
-                    self.console.print("[grey50]No projects. Use /learn to create one.[/]")
+                    self.console.print("[grey50]No projects. Use /project new to create one.[/]")
                 else:
                     current = self.agent.memory.current_project_id
                     for p in projects:
@@ -548,21 +624,32 @@ Type your message, or `/help` for commands.""")
         start_time = time.monotonic()
         phase = "Thinking"
 
-        with self.console.status("", spinner="dots") as status:
-            try:
-                while self.agent.is_running:
-                    self._flush_events()
-                    elapsed = time.monotonic() - start_time
-                    if self._tool_count > 0:
-                        phase = "Running tools"
-                    tool_info = f" {self._tool_count} tools" if self._tool_count else ""
-                    status.update(f"[grey50]{phase}... ({self._format_elapsed(elapsed)}){tool_info}[/]")
-                    threading.Event().wait(0.1)
-                self._flush_events()
-            except KeyboardInterrupt:
-                self.agent.abort()
-                self.console.print("[grey50]Aborting current task...[/]")
+        while self.agent.is_running:
+            ask_events = []
+            with self.console.status("", spinner="dots") as status:
+                try:
+                    while self.agent.is_running:
+                        ask_events = self._flush_events()
+                        elapsed = time.monotonic() - start_time
+                        if self._tool_count > 0:
+                            phase = "Running tools"
+                        tool_info = f" {self._tool_count} tools" if self._tool_count else ""
+                        status.update(f"[grey50]{phase}... ({self._format_elapsed(elapsed)}){tool_info}[/]")
+                        if ask_events:
+                            break  # Exit spinner to handle ask_user
+                        threading.Event().wait(0.1)
+                except KeyboardInterrupt:
+                    self.agent.abort()
+                    self.console.print("[grey50]Aborting current task...[/]")
+                    return
 
+            # Handle ask_user events outside spinner context (allows user input)
+            new_ask_events = self._flush_events()
+            ask_events.extend(new_ask_events)
+            for ask_data in ask_events:
+                self._handle_ask_user(ask_data)
+
+        self._flush_events()
         elapsed = time.monotonic() - start_time
         muted = get_color("text-muted")
         tool_info = f" {self._tool_count} tools" if self._tool_count else ""

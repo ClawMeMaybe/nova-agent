@@ -114,14 +114,15 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
         tool_results = []
         next_prompts = set()
 
+        # Emit LLM text response even when tool calls are present
+        # (progress headers, score tables, explanations alongside ask_user etc.)
+        if handler.events and response.content:
+            handler.events.emit(AgentEvent.AGENT_RESPONSE, response.content)
+
         for ii, tc in enumerate(tool_calls):
             tool_name, args, tid = tc['tool_name'], tc['args'], tc.get('id', '')
 
-            if tool_name == 'no_tool':
-                # Emit direct text response for TUI
-                if handler.events and response.content:
-                    handler.events.emit(AgentEvent.AGENT_RESPONSE, response.content)
-            else:
+            if tool_name != 'no_tool':
                 logger.debug(f"Tool: {tool_name}")
                 if handler.events:
                     handler.events.emit(AgentEvent.TOOL_CALL, {"name": tool_name, "summary": _compact_args(args)})

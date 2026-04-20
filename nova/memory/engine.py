@@ -884,10 +884,12 @@ class NovaMemory:
                 return existing['id']
             raise
 
-    def _content_is_duplicate(self, existing: str, new: str) -> bool:
+    def _content_is_duplicate(self, existing: str, new: str, threshold: float = 0.85) -> bool:
         """Check if new content is substantially duplicated in existing.
 
-        80% token overlap threshold (was 60% — too aggressive, different pages rejected).
+        Short content (<100 chars): use character similarity (difflib) vs threshold
+        Longer content: use token overlap vs threshold
+        Default threshold 0.85 (conservative for wiki append). Facts/skills pass 0.78.
         Skip dedup if new content is significantly longer (>200 chars more than existing).
         """
         if not new.strip():
@@ -895,12 +897,17 @@ class NovaMemory:
         # Skip dedup if new content adds significant new material
         if len(new) > len(existing) + 200:
             return False
+        # Short content: character-level similarity handles few-token edge cases
+        if len(new) < 100 or len(existing) < 100:
+            import difflib
+            return difflib.SequenceMatcher(None, existing.lower(), new.lower()).ratio() >= threshold
+        # Longer content: token overlap is faster and more semantic
         existing_tokens = set(existing.lower().split())
         new_tokens = set(new.lower().split())
         if not new_tokens:
             return True
         overlap = len(existing_tokens & new_tokens) / len(new_tokens)
-        return overlap > 0.80
+        return overlap > threshold
 
     @_write_locked
     def wiki_ingest(self, title: str, content: str, tags: str,
@@ -1053,6 +1060,35 @@ class NovaMemory:
     @_write_locked
     def fact_add(self, content: str, category: str = 'general',
                  tags: str = '', trust_score: float = 0.5) -> int:
+        # Near-duplicate check: search for similar facts in current scope before inserting
+        keywords = [w for w in content.lower().split() if len(w) > 3][:8]
+        if keywords:
+            scope = self._scope_where()
+            params = self._scope_params()
+            existing = self._conn.execute(
+                f"SELECT id, content, tags FROM facts WHERE {scope} AND category=?",
+                params + [category]
+            ).fetchall()
+            for row in existing:
+                if self._content_is_duplicate(row['content'], content, threshold=0.78):
+                    # Merge tags instead of inserting duplicate
+                    old_tags = set(row['tags'].split(',')) if row['tags'] else set()
+                    new_tags = set(tags.split(',')) if tags else set()
+                    combined = ','.join(sorted(old_tags | new_tags))
+                    # Keep whichever is more detailed (longer content)
+                    if len(content) > len(row['content']):
+                        now = datetime.now().isoformat()
+                        self._conn.execute(
+                            "UPDATE facts SET content=?, tags=?, trust_score=?, updated_at=? WHERE id=?",
+                            (content, combined, trust_score, now, row['id'])
+                        )
+                        self._conn.commit()
+                    elif new_tags - old_tags:
+                        now = datetime.now().isoformat()
+                        self._conn.execute("UPDATE facts SET tags=?, updated_at=? WHERE id=?", (combined, now, row['id']))
+                        self._conn.commit()
+                    return row['id']
+
         now = datetime.now().isoformat()
         project_id = self._scope_write_id()
         try:
@@ -1349,6 +1385,32 @@ class NovaMemory:
                   tags: str = '', success_rate: float = 0.5,
                   triggers: str = '', pitfalls: list = None,
                   contract: str = None) -> int:
+        # Near-duplicate check: find skills with overlapping descriptions in same scope
+        scope = self._scope_where()
+        params = self._scope_params()
+        existing_skills = self._conn.execute(
+            f"SELECT id, name, description, triggers, tags FROM skills WHERE {scope}",
+            params
+        ).fetchall()
+        for row in existing_skills:
+            if row['name'] == name:
+                continue  # Same name handled by IntegrityError below
+            if self._content_is_duplicate(row['description'], description, threshold=0.78):
+                # Overlapping description — merge triggers + tags into existing skill
+                old_triggers = set(row['triggers'].split(',')) if row['triggers'] else set()
+                new_triggers = set(triggers.split(',')) if triggers else set()
+                old_tags = set(row['tags'].split(',')) if row['tags'] else set()
+                new_tags = set(tags.split(',')) if tags else set()
+                combined_triggers = ','.join(sorted(old_triggers | new_triggers))
+                combined_tags = ','.join(sorted(old_tags | new_tags))
+                now = datetime.now().isoformat()
+                self._conn.execute(
+                    "UPDATE skills SET triggers=?, tags=?, updated_at=? WHERE id=?",
+                    (combined_triggers, combined_tags, now, row['id'])
+                )
+                self._conn.commit()
+                return row['id']
+
         steps_json = json.dumps(steps, ensure_ascii=False)
         pitfalls_json = json.dumps(pitfalls or [], ensure_ascii=False)
         now = datetime.now().isoformat()
