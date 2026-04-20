@@ -144,6 +144,17 @@ class NovaAgent:
             )
         except Exception:
             pass
+        from nova.implement import build_implement_prompt
+        try:
+            self.memory.skill_add(
+                name="implement",
+                description="Plan-driven implementation loop — reads brainstorm spec, creates plan, executes step-by-step with acceptance verification",
+                steps=[], triggers="implement,build,make,execute,ralph,do it",
+                tags="implement,contract,command",
+                contract=build_implement_prompt(None)
+            )
+        except Exception:
+            pass
 
     def abort(self):
         if not self._busy.is_set():

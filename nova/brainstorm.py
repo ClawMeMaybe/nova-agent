@@ -158,7 +158,18 @@ When interview ends, produce:
 ```
 
 Then persist via:
-`wiki_ingest(title="Brainstorm Spec: {title}", content=<spec markdown>, tags="brainstorm,spec,{topic_keywords}", category="spec")
+`wiki_ingest(title="Brainstorm Spec: {title}", content=<spec markdown>, tags="brainstorm,spec,{topic_keywords}", category="decision")
+
+After saving the spec, use ask_user to offer continuation:
+```
+ask_user(
+    question="Spec saved! Would you like to implement it now?",
+    candidates=["Yes, start implementing — use the implement skill", "No, I'll review the spec first", "Custom (type your own)"]
+)
+```
+
+If user says "Yes", inject the implement skill prompt:
+`wiki_query(query="implement", tags="contract,command")` to load the implement contract skill, then follow its Phase 0 protocol.
 
 ## Protocol Checklist (verify each round)
 - [ ] Show progress header with round number and ambiguity

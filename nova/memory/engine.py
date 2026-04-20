@@ -47,7 +47,7 @@ def _write_locked(method):
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS _meta (key TEXT UNIQUE, value TEXT);
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '9');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '10');
 
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -178,6 +178,22 @@ CREATE TABLE IF NOT EXISTS knowledge_links (
 );
 CREATE INDEX IF NOT EXISTS idx_klinks_source ON knowledge_links(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_klinks_target ON knowledge_links(target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS implement_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spec_slug TEXT NOT NULL,
+    criterion TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    step_number INTEGER DEFAULT NULL,
+    verified_at TEXT DEFAULT NULL,
+    verification_method TEXT DEFAULT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    project_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_impl_tasks_spec ON implement_tasks(spec_slug);
+CREATE INDEX IF NOT EXISTS idx_impl_tasks_status ON implement_tasks(spec_slug, status);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
     title, content, tags, category,
@@ -636,6 +652,32 @@ class NovaMemory:
             except Exception as e:
                 print(f"[Migration] V9 migration error: {e}")
 
+        if current_version < 10:
+            # V10: Add implement_tasks table for plan-driven execution tracking
+            try:
+                self._conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS implement_tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        spec_slug TEXT NOT NULL,
+                        criterion TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        step_number INTEGER DEFAULT NULL,
+                        verified_at TEXT DEFAULT NULL,
+                        verification_method TEXT DEFAULT NULL,
+                        notes TEXT NOT NULL DEFAULT '',
+                        project_id TEXT DEFAULT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_impl_tasks_spec ON implement_tasks(spec_slug);
+                    CREATE INDEX IF NOT EXISTS idx_impl_tasks_status ON implement_tasks(spec_slug, status);
+                """)
+                self._conn.commit()
+                self._conn.execute("UPDATE _meta SET value='10' WHERE key='schema_version'")
+                self._conn.commit()
+            except Exception as e:
+                print(f"[Migration] V10 migration error: {e}")
+
     def _seed_defaults(self):
         if self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE slug='meta-rules'").fetchone()[0] == 0:
             self.wiki_add('meta-rules', 'Meta Rules', DEFAULT_META_RULES,
@@ -1054,6 +1096,54 @@ class NovaMemory:
                 if len(full['content']) > 10000:
                     issues.append(f"Page '{page['slug']}' is oversized ({len(full['content'])} bytes)")
         return issues
+
+    # ── Implement Task Operations ──
+
+    def task_create(self, spec_slug: str, criterion: str, step_number: int = None) -> int:
+        """Create an implement task (acceptance criterion to track)."""
+        now = datetime.now().isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO implement_tasks (spec_slug,criterion,status,step_number,project_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (spec_slug, criterion, 'pending', step_number, self._scope_write_id(), now, now)
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def task_update_status(self, task_id: int, status: str, notes: str = '',
+                           verification_method: str = None) -> bool:
+        """Update a task's status (pending/pass/fail)."""
+        now = datetime.now().isoformat()
+        count = self._conn.execute(
+            "UPDATE implement_tasks SET status=?,notes=?,verified_at=?,verification_method=?,updated_at=? WHERE id=?",
+            (status, notes, now if status != 'pending' else None, verification_method, now, task_id)
+        ).rowcount
+        self._conn.commit()
+        return count > 0
+
+    def task_list_by_spec(self, spec_slug: str) -> List[Dict]:
+        """List all tasks for a spec, optionally filtered by status."""
+        rows = self._conn.execute(
+            f"SELECT * FROM implement_tasks WHERE spec_slug=? AND ({self._scope_where('implement_tasks.')}) ORDER BY step_number, id",
+            (spec_slug,) + tuple(self._scope_params())
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def task_progress(self, spec_slug: str) -> Dict:
+        """Get progress summary for a spec: counts by status."""
+        where = f"spec_slug=? AND ({self._scope_where('implement_tasks.')})"
+        params = (spec_slug,) + tuple(self._scope_params())
+        total = self._conn.execute(f"SELECT COUNT(*) FROM implement_tasks WHERE {where}", params).fetchone()[0]
+        passed = self._conn.execute(f"SELECT COUNT(*) FROM implement_tasks WHERE {where} AND status='pass'", params).fetchone()[0]
+        failed = self._conn.execute(f"SELECT COUNT(*) FROM implement_tasks WHERE {where} AND status='fail'", params).fetchone()[0]
+        pending = total - passed - failed
+        return {
+            'spec_slug': spec_slug,
+            'total': total,
+            'passed': passed,
+            'failed': failed,
+            'pending': pending,
+            'complete': passed == total and total > 0,
+        }
 
     # ── Fact Operations ──
 

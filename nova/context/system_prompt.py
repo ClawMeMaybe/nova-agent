@@ -67,6 +67,15 @@ The system injects a **knowledge catalog** and any **proven facts** (trust > 0.7
 - **fact_feedback(id, helpful, reason)** — mark a fact as helpful (+0.05 trust) or unhelpful (-0.10 trust). Only works on facts you accessed this session via fact_search or db_query. Unhelpful requires a reason (min 10 chars). Unhelpful feedback also flags linked skills for review (cascade).
 - **skill_feedback(name, helpful, reason)** — mark a skill as helpful or unhelpful. Only works on skills you accessed this session via skill_search. Unhelpful requires a reason (min 10 chars).
 
+### How to Track Implementation Progress
+When implementing a brainstorm spec, use implement task tools to track acceptance criteria:
+- **task_create(spec_slug, criterion, step_number)** — create a task for each acceptance criterion
+- **task_update(id, status, notes, verification_method)** — update task status (pending/pass/fail)
+- **task_list(spec_slug)** — list all tasks for a spec with status
+- **task_progress(spec_slug)** — get progress summary (passed/total/complete?)
+
+These track structured state in the `implement_tasks` table — use wiki_ingest for plans and progress summaries.
+
 Relevant prior knowledge is auto-injected at task start — the system pushes a task-relevant knowledge bundle (cluster_search) when possible, with a catalog fallback. You don't need to explicitly search before beginning a task.
 
 ### Trust Scores

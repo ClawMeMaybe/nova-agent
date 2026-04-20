@@ -1068,6 +1068,102 @@ class NovaHandler(BaseHandler):
 
         return StepOutcome(result, next_prompt=next_prompt)
 
+    # ── Implement Task Tools ──
+
+    def do_task_create(self, args, response):
+        """Create an implement task (acceptance criterion to track)."""
+        spec_slug = args.get("spec_slug", "")
+        criterion = args.get("criterion", "")
+        step_number = args.get("step_number")
+
+        if not spec_slug or not criterion:
+            return StepOutcome({"status": "error", "msg": "spec_slug and criterion required"}, next_prompt="\n")
+
+        try:
+            task_id = self.memory.task_create(spec_slug, criterion, step_number=step_number)
+            result = {
+                "status": "success",
+                "msg": f"Task created (id={task_id}). Criterion: '{criterion}' for spec '{spec_slug}'.",
+                "task_id": task_id,
+            }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_task_update(self, args, response):
+        """Update a task's status (pending/pass/fail)."""
+        task_id = args.get("id")
+        status = args.get("status", "pending")
+        notes = args.get("notes", "")
+        verification_method = args.get("verification_method")
+
+        if task_id is None:
+            return StepOutcome({"status": "error", "msg": "Task ID required"}, next_prompt="\n")
+        if status not in ('pending', 'pass', 'fail'):
+            return StepOutcome({"status": "error", "msg": "Status must be pending, pass, or fail"}, next_prompt="\n")
+
+        try:
+            success = self.memory.task_update_status(task_id, status, notes=notes,
+                                                      verification_method=verification_method)
+            if success:
+                result = {"status": "success", "msg": f"Task {task_id} updated to {status}."}
+            else:
+                result = {"status": "error", "msg": f"Task {task_id} not found"}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_task_list(self, args, response):
+        """List implement tasks for a spec."""
+        spec_slug = args.get("spec_slug", "")
+
+        if not spec_slug:
+            return StepOutcome({"status": "error", "msg": "spec_slug required"}, next_prompt="\n")
+
+        try:
+            tasks = self.memory.task_list_by_spec(spec_slug)
+            progress = self.memory.task_progress(spec_slug)
+            if not tasks:
+                result = {"status": "no_results", "msg": f"No tasks for spec '{spec_slug}'"}
+            else:
+                summaries = []
+                for t in tasks:
+                    s = f"[{t['status']}] #{t['id']}: {t['criterion']}"
+                    if t.get('notes'):
+                        s += f" — {t['notes']}"
+                    summaries.append(s)
+                result = {
+                    "status": "success",
+                    "msg": f"{progress['passed']}/{progress['total']} criteria passed for '{spec_slug}'",
+                    "progress": progress,
+                    "tasks": summaries,
+                }
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_task_progress(self, args, response):
+        """Get progress summary for a spec's implementation."""
+        spec_slug = args.get("spec_slug", "")
+
+        if not spec_slug:
+            return StepOutcome({"status": "error", "msg": "spec_slug required"}, next_prompt="\n")
+
+        try:
+            progress = self.memory.task_progress(spec_slug)
+            result = {"status": "success", "msg": f"Progress: {progress['passed']}/{progress['total']} passed", "progress": progress}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
     # ── Meta tool ──
 
     def do_no_tool(self, args, response):
