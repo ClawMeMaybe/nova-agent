@@ -234,6 +234,24 @@ class NovaHandler(BaseHandler):
             pass
         return current_name
 
+    def _resolve_link_id(self, item_type, item_name):
+        """Resolve ID from name — needed because knowledge_links has NOT NULL on source_id/target_id."""
+        if not item_name:
+            return None
+        try:
+            if item_type == 'fact':
+                row = self.memory._conn.execute("SELECT id FROM facts WHERE content LIKE ?", (item_name[:40] + '%',)).fetchone()
+                return row['id'] if row else None
+            elif item_type == 'skill':
+                row = self.memory._conn.execute("SELECT id FROM skills WHERE name=?", (item_name,)).fetchone()
+                return row['id'] if row else None
+            elif item_type == 'wiki':
+                row = self.memory._conn.execute("SELECT id FROM wiki_pages WHERE slug=? OR title=?", (item_name, item_name)).fetchone()
+                return row['id'] if row else None
+        except Exception:
+            pass
+        return None
+
     def _get_anchor_prompt(self, skip=False):
         if skip:
             return "\n"
@@ -570,6 +588,16 @@ class NovaHandler(BaseHandler):
         # Auto-fill names from DB when IDs provided but names empty
         source_name = self._resolve_link_name(source_type, source_id, source_name)
         target_name = self._resolve_link_name(target_type, target_id, target_name)
+
+        # Resolve IDs from names when only names provided (DB requires NOT NULL)
+        if source_id is None and source_name:
+            source_id = self._resolve_link_id(source_type, source_name)
+            if source_id is None:
+                return StepOutcome({"status": "error", "msg": f"Could not find {source_type} '{source_name}' to resolve source_id"}, next_prompt="\n")
+        if target_id is None and target_name:
+            target_id = self._resolve_link_id(target_type, target_name)
+            if target_id is None:
+                return StepOutcome({"status": "error", "msg": f"Could not find {target_type} '{target_name}' to resolve target_id"}, next_prompt="\n")
 
         try:
             link_id = self.memory.link_add(

@@ -40,8 +40,19 @@ COMMANDS = {
     "/learn": "Learn about current project directory and generate knowledge",
     "/brainstorm": "Socratic interview with ambiguity scoring",
     "/skill-install": "Install a skill from .md file or URL",
+    "/project": "List projects or switch scope (/project <name>)",
+    "/verbose": "Show all tool output (read + action)",
+    "/quiet": "Show only action tool output (default)",
     "/help": "Show available commands",
 }
+
+
+SILENT_TOOLS = frozenset({
+    "fact_search", "wiki_query", "skill_search", "link_search", "cluster_search",
+    "db_schema", "project_list", "project_info", "wiki_export",
+    "project_learn", "update_working_checkpoint", "start_long_term_update",
+    "file_read", "web_scan", "web_execute_js",
+})
 
 
 class NovaApp:
@@ -54,6 +65,7 @@ class NovaApp:
         self._event_buffer = []
         self._event_lock = threading.Lock()
         self._tool_count = 0
+        self._verbose_mode = False
 
     def run(self):
         """Main REPL loop."""
@@ -64,6 +76,9 @@ class NovaApp:
 
         # Register event listener
         self.agent.events.add_listener(self._on_event)
+
+        # Auto-select project matching current directory
+        self._auto_select_project()
 
         # Show startup banner
         self._show_banner()
@@ -110,6 +125,18 @@ class NovaApp:
 
         self.console.print("[grey50]Goodbye![/]")
 
+    def _auto_select_project(self):
+        """Auto-select project matching current directory name."""
+        project_name = os.path.basename(os.getcwd())
+        if self.agent.memory.current_project_id is not None:
+            return
+        projects = self.agent.memory.project_list()
+        for p in projects:
+            if p['name'] == project_name:
+                self.agent.memory.project_select(p['id'])
+                self.agent.current_project_id = p['id']
+                return
+
     def _show_banner(self):
         """Show startup banner with Rich formatting."""
         stats = self.agent.memory.stats()
@@ -118,7 +145,7 @@ class NovaApp:
         banner = Markdown(f"""**Nova Agent v{__version__}** — Self-evolving AI assistant
 
 - Model: {model_name}
-- Local: {stats['project_wiki_pages']} wiki | {stats['project_facts']} facts | {stats['project_skills']} skills
+- Project: {stats['current_project_name'] or 'none'} | Facts: {stats['project_facts']} | Skills: {stats['project_skills']} | Wiki: {stats['project_wiki_pages']}
 - Global: {stats['global_wiki_pages']} wiki | {stats['global_facts']} facts | {stats['global_skills']} skills
 
 Type your message, or `/help` for commands.""")
@@ -150,6 +177,9 @@ Type your message, or `/help` for commands.""")
         elif event_type == AgentEvent.TOOL_CALL:
             if isinstance(data, dict):
                 name = data.get("name", "?")
+                # In quiet mode, suppress all TOOL_CALL lines (show result only)
+                if not self._verbose_mode:
+                    return
                 summary = data.get("summary", "")
                 primary = self._extract_primary_arg(summary, limit=100)
                 tool_color = get_color("tool-name")
@@ -167,6 +197,18 @@ Type your message, or `/help` for commands.""")
                 success_color = get_color("success")
                 error_color = get_color("error")
                 warning_color = get_color("warning")
+                # ALWAYS show errors regardless of mode
+                if status_val not in ("success", "done"):
+                    icon = f"[bold {error_color}]FAIL[/]"
+                    display = summary[:100] if summary else ""
+                    self.console.print(
+                        f"  [{tool_color}]{name}[/] {display} {icon}",
+                        highlight=False
+                    )
+                    return
+                # In quiet mode, suppress results for silent (read/internal) tools
+                if not self._verbose_mode and name in SILENT_TOOLS:
+                    return
                 if status_val == "success":
                     icon = f"[bold {success_color}]OK[/]"
                 elif status_val == "done":
@@ -310,6 +352,42 @@ Type your message, or `/help` for commands.""")
             self._running = False
             return
 
+        if cmd == "/verbose":
+            self._verbose_mode = True
+            self.console.print("[bold]Verbose mode:[/] showing all tool output")
+            return
+
+        if cmd == "/quiet":
+            self._verbose_mode = False
+            self.console.print("[bold]Quiet mode:[/] showing only action tool output")
+            return
+
+        if cmd.startswith("/project"):
+            arg = cmd[len("/project"):].strip()
+            projects = self.agent.memory.project_list()
+            if not arg:
+                if not projects:
+                    self.console.print("[grey50]No projects. Use /learn to create one.[/]")
+                else:
+                    current = self.agent.memory.current_project_id
+                    for p in projects:
+                        marker = " [bold]*(current)[/]" if p['id'] == current else ""
+                        self.console.print(f"  {p['name']} (id={p['id'][:8]}){marker}")
+            else:
+                match = None
+                for p in projects:
+                    if p['name'] == arg or p['id'].startswith(arg):
+                        match = p
+                        break
+                if match:
+                    self.agent.memory.project_select(match['id'])
+                    self.agent.current_project_id = match['id']
+                    stats = self.agent.memory.stats()
+                    self.console.print(f"[bold]Switched to:[/] {match['name']} — {stats['project_facts']} facts | {stats['project_skills']} skills | {stats['project_wiki_pages']} wiki")
+                else:
+                    self.console.print(f"[bold red]Project not found:[/] {arg}")
+            return
+
         if cmd == "/help":
             lines = Text()
             lines.append("Available commands:\n", style="bold")
@@ -321,7 +399,8 @@ Type your message, or `/help` for commands.""")
 
         if cmd == "/stats":
             stats = self.agent.memory.stats()
-            self.console.print(f"[bold]Local:[/] Wiki: {stats['project_wiki_pages']} | Facts: {stats['project_facts']} | Skills: {stats['project_skills']} | Sessions: {stats['project_sessions']} | Trust: {stats['avg_trust']:.2f}")
+            project_label = f"[bold]Project ({stats['current_project_name'] or stats['current_project']}):[/]" if stats['current_project'] else "[bold]Project:[/]"
+            self.console.print(f"{project_label} Wiki: {stats['project_wiki_pages']} | Facts: {stats['project_facts']} | Skills: {stats['project_skills']} | Sessions: {stats['project_sessions']} | Trust: {stats['avg_trust']:.2f}")
             self.console.print(f"[bold]Global:[/] Wiki: {stats['global_wiki_pages']} | Facts: {stats['global_facts']} | Skills: {stats['global_skills']} | Sessions: {stats['global_sessions']} | Trust: {stats['avg_trust']:.2f}")
             return
 
@@ -329,9 +408,11 @@ Type your message, or `/help` for commands.""")
             pages = self.agent.memory.wiki_list()
             if not pages:
                 self.console.print("[grey50]No wiki pages.[/]")
+            current_pid = self.agent.memory.current_project_id
             for p in pages:
                 tier = p.get('_tier', '?')
-                self.console.print(f"  [{tier}] [{p['category']}] {p['title']} (tags: {p['tags']})")
+                project_marker = " [cyan]*[/]" if current_pid and p.get('project_id') == current_pid else ""
+                self.console.print(f"  [{tier}] [{p['category']}] {p['title']} (tags: {p['tags']}){project_marker}")
             return
 
         if cmd == "/cron":
@@ -407,7 +488,7 @@ Type your message, or `/help` for commands.""")
             learn_prompt = build_learn_prompt(scan)
             dq = self.agent.put_task(learn_prompt, source="user")
             stats = self.agent.memory.stats()
-            self._wait_with_spinner(dq, label="Learning", completion_msg=f"[bold]Sync complete![/] Facts: {stats['total_facts']} | Skills: {stats['total_skills']} | Wiki: {stats['total_wiki_pages']}")
+            self._wait_with_spinner(dq, label="Learning", completion_msg=f"[bold]Sync complete![/] Project: {stats['project_facts']} facts | {stats['project_skills']} skills | {stats['project_wiki_pages']} wiki | Global: {stats['global_facts']} facts | {stats['global_skills']} skills | {stats['global_wiki_pages']} wiki")
             return
         if cmd.startswith("/skill-install"):
             source = cmd[len("/skill-install"):].strip()

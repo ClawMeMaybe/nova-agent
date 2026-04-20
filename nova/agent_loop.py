@@ -138,10 +138,11 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             if outcome.data is not None and tool_name != 'no_tool':
                 datastr = json.dumps(outcome.data, ensure_ascii=False) if isinstance(outcome.data, (dict, list)) else str(outcome.data)
                 tool_results.append({'tool_use_id': tid, 'content': datastr})
-                # Emit tool result event for TUI
+                # Emit tool result event for TUI — extract msg for cleaner display
                 if handler.events:
-                    result_summary = str(outcome.data)[:150] if outcome.data else ""
-                    handler.events.emit(AgentEvent.TOOL_RESULT, {"name": tool_name, "summary": result_summary, "status": "success" if isinstance(outcome.data, dict) and outcome.data.get("status") == "success" else "done"})
+                    result_data = outcome.data if isinstance(outcome.data, dict) else {}
+                    display_msg = result_data.get("msg", "") or str(outcome.data)[:100]
+                    handler.events.emit(AgentEvent.TOOL_RESULT, {"name": tool_name, "summary": display_msg, "status": "success" if result_data.get("status") == "success" else "done"})
 
             next_prompts.add(outcome.next_prompt)
 

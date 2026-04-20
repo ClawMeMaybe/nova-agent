@@ -459,6 +459,7 @@ class NovaMemory:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.current_project_id = None  # None = global scope
+        self.current_project_name = None
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.RLock()  # Reentrant lock — allows nested calls (e.g. wiki_ingest → wiki_add)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -667,9 +668,12 @@ class NovaMemory:
     def project_select(self, project_id: Optional[str]) -> None:
         """Set the current project scope. None resets to global scope."""
         if project_id is not None:
-            row = self._conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+            row = self._conn.execute("SELECT id, name FROM projects WHERE id=?", (project_id,)).fetchone()
             if not row:
                 raise ValueError(f"Project {project_id} not found")
+            self.current_project_name = row['name']
+        else:
+            self.current_project_name = None
         self.current_project_id = project_id
 
     def project_list(self) -> List[Dict]:
@@ -2132,7 +2136,9 @@ class NovaMemory:
             'evolution_score': ev_score,
             'evolution_trend': ev_trend,
             'current_project': self.current_project_id,
+            'current_project_name': self.current_project_name,
         }
+        return result
 
     # ── SQL Sandbox (LLM-as-DBA) ──
 
