@@ -9,6 +9,7 @@ import logging
 import os
 import queue
 import threading
+import time
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -51,6 +52,7 @@ class NovaApp:
         self._running = True
         self._event_buffer = []
         self._event_lock = threading.Lock()
+        self._tool_count = 0
 
     def run(self):
         """Main REPL loop."""
@@ -118,6 +120,8 @@ Type your message, or `/help` for commands.""")
         """EventBus listener — buffer events, flush when input is idle."""
         with self._event_lock:
             self._event_buffer.append((event_type, data))
+            if event_type == AgentEvent.TOOL_RESULT:
+                self._tool_count += 1
 
     def _flush_events(self):
         """Render all buffered events inline."""
@@ -138,24 +142,10 @@ Type your message, or `/help` for commands.""")
             if isinstance(data, dict):
                 name = data.get("name", "?")
                 summary = data.get("summary", "")
-                if summary.startswith("{"):
-                    try:
-                        args_dict = json.loads(summary.rstrip("..."))
-                        if "path" in args_dict:
-                            summary = args_dict["path"]
-                        elif "query" in args_dict:
-                            summary = args_dict["query"][:40]
-                        elif "code" in args_dict:
-                            summary = args_dict["code"][:40]
-                        elif "sql" in args_dict:
-                            summary = args_dict["sql"][:40]
-                        else:
-                            summary = ""
-                    except Exception:
-                        summary = ""
+                primary = self._extract_primary_arg(summary, limit=100)
                 tool_color = get_color("tool-name")
                 self.console.print(
-                    f"  [{tool_color}]{name}[/] {summary[:60]}",
+                    f"  [{tool_color}]{name}[/] {primary}",
                     highlight=False
                 )
 
@@ -169,27 +159,22 @@ Type your message, or `/help` for commands.""")
                 error_color = get_color("error")
                 warning_color = get_color("warning")
                 if status_val == "success":
-                    icon = f"[bold {success_color}]✓[/]"
+                    icon = f"[bold {success_color}]OK[/]"
                 elif status_val == "done":
-                    icon = f"[bold {warning_color}]●[/]"
+                    icon = f"[bold {warning_color}]OK[/]"
                 else:
-                    icon = f"[bold {error_color}]✗[/]"
+                    icon = f"[bold {error_color}]FAIL[/]"
+                display = summary[:100] if summary else ""
                 self.console.print(
-                    f"  [{tool_color}]{name}[/] {summary[:60]} {icon}",
+                    f"  [{tool_color}]{name}[/] {display} {icon}",
                     highlight=False
                 )
 
         elif event_type == AgentEvent.AGENT_THINKING:
-            muted = get_color("text-muted")
-            self.console.print(f"[{muted}]Thinking...[/]", highlight=False)
+            pass  # Handled by Rich Status spinner
 
         elif event_type == AgentEvent.AGENT_DONE:
-            muted = get_color("text-muted")
-            tool_count = 0
-            if isinstance(data, dict):
-                tool_count = data.get("tool_count", 0)
-            if tool_count > 0:
-                self.console.print(f"[{muted}]{tool_count} tools completed[/]", highlight=False)
+            pass  # Completion line printed by _send_message with timer
 
         elif event_type == AgentEvent.ERROR:
             error_color = get_color("error")
@@ -201,6 +186,81 @@ Type your message, or `/help` for commands.""")
 
         elif event_type == AgentEvent.ASK_USER:
             self._handle_ask_user(data)
+
+    def _format_elapsed(self, seconds):
+        """Format elapsed time with appropriate units: seconds, minutes, hours."""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            m = int(seconds // 60)
+            s = int(seconds % 60)
+            return f"{m}m{s:02d}s"
+        else:
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            return f"{h}h{m:02d}m{s:02d}s"
+
+    def _extract_primary_arg(self, summary, limit=100):
+        """Parse tool call summary JSON and extract the most meaningful field.
+
+        Priority order: path > query > sql > code > command > url.
+        Returns the value string truncated to `limit` chars.
+        """
+        if not summary:
+            return ""
+        if summary.startswith("{"):
+            try:
+                args_dict = json.loads(summary.rstrip("..."))
+            except Exception:
+                return summary[:limit]
+            for key in ("path", "query", "sql", "code", "command", "url"):
+                val = args_dict.get(key)
+                if val and isinstance(val, str) and len(val) > 2:
+                    return val[:limit]
+            for k, v in args_dict.items():
+                if isinstance(v, str) and len(v) > 2 and k != "_index":
+                    return v[:limit]
+            return ""
+        return summary[:limit]
+
+    def _wait_with_spinner(self, dq, label="Working", completion_msg=None):
+        """Wait for agent task completion with Rich Status spinner+timer.
+
+        Args:
+            dq: DisplayQueue from put_task()
+            label: Phase label for spinner (e.g. "Learning", "Brainstorming")
+            completion_msg: Optional Rich markup string to print on completion
+        """
+        self._tool_count = 0
+        start_time = time.monotonic()
+
+        with self.console.status("", spinner="dots") as status:
+            try:
+                while True:
+                    self._flush_events()
+                    elapsed = time.monotonic() - start_time
+                    phase = label if self._tool_count == 0 else f"{label} — running tools"
+                    tool_info = f" {self._tool_count} tools" if self._tool_count else ""
+                    status.update(f"[grey50]{phase}... ({self._format_elapsed(elapsed)}){tool_info}[/]")
+                    try:
+                        item = dq.get(timeout=0.5)
+                    except queue.Empty:
+                        if not self.agent.is_running:
+                            break
+                        continue
+                    if 'done' in item:
+                        break
+            except KeyboardInterrupt:
+                self.agent.abort()
+                self.console.print("[grey50]Aborting current task...[/]")
+
+        elapsed = time.monotonic() - start_time
+        muted = get_color("text-muted")
+        tool_info = f" {self._tool_count} tools" if self._tool_count else ""
+        self.console.print(f"[{muted}]● Done ({self._format_elapsed(elapsed)}){tool_info}[/]", highlight=False)
+        if completion_msg:
+            self.console.print(completion_msg)
 
     def _handle_ask_user(self, data):
         """Handle ask_user event with prompt_toolkit."""
@@ -314,17 +374,7 @@ Type your message, or `/help` for commands.""")
                 self.console.print("[bold]Brainstorm Mode[/] — Socratic interview with ambiguity scoring")
             brainstorm_prompt = build_brainstorm_prompt(topic)
             dq = self.agent.put_task(brainstorm_prompt, source="user")
-            while True:
-                self._flush_events()
-                try:
-                    item = dq.get(timeout=0.5)
-                except queue.Empty:
-                    if not self.agent.is_running:
-                        break
-                    continue
-                if 'done' in item:
-                    self.console.print("[bold]Brainstorm complete![/] Spec saved to memory.")
-                    break
+            self._wait_with_spinner(dq, label="Brainstorming", completion_msg="[bold]Brainstorm complete![/] Spec saved to memory.")
             return
 
         if cmd == "/learn":
@@ -347,19 +397,8 @@ Type your message, or `/help` for commands.""")
                 self.console.print(f"[bold]Using existing project scope:[/] {project_name}")
             learn_prompt = build_learn_prompt(scan)
             dq = self.agent.put_task(learn_prompt, source="user")
-            # Wait for learn to complete
-            while True:
-                self._flush_events()
-                try:
-                    item = dq.get(timeout=0.5)
-                except queue.Empty:
-                    if not self.agent.is_running:
-                        break
-                    continue
-                if 'done' in item:
-                    stats = self.agent.memory.stats()
-                    self.console.print(f"[bold]Sync complete![/] Facts: {stats['total_facts']} | Skills: {stats['total_skills']} | Wiki: {stats['total_wiki_pages']}")
-                    break
+            stats = self.agent.memory.stats()
+            self._wait_with_spinner(dq, label="Learning", completion_msg=f"[bold]Sync complete![/] Facts: {stats['total_facts']} | Skills: {stats['total_skills']} | Wiki: {stats['total_wiki_pages']}")
             return
         if cmd.startswith("/skill-install"):
             source = cmd[len("/skill-install"):].strip()
@@ -401,17 +440,7 @@ Type your message, or `/help` for commands.""")
             )
             dq = self.agent.put_task(install_prompt, source="user")
             self.console.print(f"[bold]Installing skills from:[/] {source}")
-            while True:
-                self._flush_events()
-                try:
-                    item = dq.get(timeout=0.5)
-                except queue.Empty:
-                    if not self.agent.is_running:
-                        break
-                    continue
-                if 'done' in item:
-                    self.console.print("[bold]Skill install complete.[/]")
-                    break
+            self._wait_with_spinner(dq, label="Installing", completion_msg="[bold]Skill install complete.[/]")
             return
 
         user_color = get_color("user-msg")
@@ -419,17 +448,32 @@ Type your message, or `/help` for commands.""")
         self.agent.put_task(cmd, source="user")
 
     def _send_message(self, text):
-        """Send user message to agent and flush events as they arrive."""
+        """Send user message to agent with dynamic spinner+timer feedback."""
         user_color = get_color("user-msg")
         self.console.print(f"[bold {user_color}]You:[/] {text}")
 
-        # Submit task — we'll pick up events via the listener
+        self._tool_count = 0
         self.agent.put_task(text, source="user")
 
-        # Wait for agent to finish, flushing events periodically
-        while self.agent.is_running:
-            self._flush_events()
-            threading.Event().wait(0.1)
+        start_time = time.monotonic()
+        phase = "Thinking"
 
-        # Final flush
-        self._flush_events()
+        with self.console.status("", spinner="dots") as status:
+            try:
+                while self.agent.is_running:
+                    self._flush_events()
+                    elapsed = time.monotonic() - start_time
+                    if self._tool_count > 0:
+                        phase = "Running tools"
+                    tool_info = f" {self._tool_count} tools" if self._tool_count else ""
+                    status.update(f"[grey50]{phase}... ({self._format_elapsed(elapsed)}){tool_info}[/]")
+                    threading.Event().wait(0.1)
+                self._flush_events()
+            except KeyboardInterrupt:
+                self.agent.abort()
+                self.console.print("[grey50]Aborting current task...[/]")
+
+        elapsed = time.monotonic() - start_time
+        muted = get_color("text-muted")
+        tool_info = f" {self._tool_count} tools" if self._tool_count else ""
+        self.console.print(f"[{muted}]● Done ({self._format_elapsed(elapsed)}){tool_info}[/]", highlight=False)

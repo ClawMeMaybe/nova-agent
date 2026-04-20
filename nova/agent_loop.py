@@ -140,7 +140,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
                 tool_results.append({'tool_use_id': tid, 'content': datastr})
                 # Emit tool result event for TUI
                 if handler.events:
-                    result_summary = str(outcome.data)[:80] if outcome.data else ""
+                    result_summary = str(outcome.data)[:150] if outcome.data else ""
                     handler.events.emit(AgentEvent.TOOL_RESULT, {"name": tool_name, "summary": result_summary, "status": "success" if isinstance(outcome.data, dict) and outcome.data.get("status") == "success" else "done"})
 
             next_prompts.add(outcome.next_prompt)
@@ -209,4 +209,4 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
 def _compact_args(args):
     a = {k: v for k, v in args.items() if k != '_index'}
     s = json.dumps(a, ensure_ascii=False)
-    return s[:120] + '...' if len(s) > 120 else s
+    return s[:200] + '...' if len(s) > 200 else s

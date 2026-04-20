@@ -1970,22 +1970,17 @@ class NovaMemory:
 
         # Catalog — what knowledge is available (not the knowledge itself)
         total_facts = self.count_facts()
-        global_facts = self._conn.execute(
-            "SELECT COUNT(*) FROM facts WHERE project_id IS NULL"
-        ).fetchone()[0]
+        global_facts = self._query_count("SELECT COUNT(*) FROM facts WHERE project_id IS NULL")
         project_facts = total_facts - global_facts
         total_wiki = self.count_wiki_pages()
-        global_wiki = self._conn.execute(
-            "SELECT COUNT(*) FROM wiki_pages WHERE project_id IS NULL"
-        ).fetchone()[0]
+        global_wiki = self._query_count("SELECT COUNT(*) FROM wiki_pages WHERE project_id IS NULL")
         project_wiki = total_wiki - global_wiki
         total_skills = self.count_skills()
-        global_skills = self._conn.execute(
-            "SELECT COUNT(*) FROM skills WHERE project_id IS NULL"
-        ).fetchone()[0]
+        global_skills = self._query_count("SELECT COUNT(*) FROM skills WHERE project_id IS NULL")
         project_skills = total_skills - global_skills
 
         # Category breakdown for routing hints
+        self._ensure_conn()
         cats = self._conn.execute(
             "SELECT category, COUNT(*) as cnt FROM facts GROUP BY category ORDER BY cnt DESC"
         ).fetchall()
@@ -2083,31 +2078,43 @@ class NovaMemory:
     def close(self):
         self._conn.close()
 
+    def _ensure_conn(self):
+        """Reconnect if the DB connection is dead."""
+        try:
+            self._conn.execute("SELECT 1").fetchone()
+        except Exception:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+
+    def _query_count(self, sql, params=()):
+        """Execute a COUNT/AVG query safely — reconnect if needed, default 0 on failure."""
+        self._ensure_conn()
+        row = self._conn.execute(sql, params).fetchone()
+        if row is None:
+            return 0
+        val = row[0]
+        return val if val is not None else 0
+
     # ── Stats ──
 
     def stats(self) -> Dict:
+        self._ensure_conn()
         ev_score, ev_trend = self.evolution_score()
-        total_facts = self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
-        global_facts = self._conn.execute("SELECT COUNT(*) FROM facts WHERE project_id IS NULL").fetchone()[0]
-        project_facts = 0
-        if self.current_project_id:
-            project_facts = self._conn.execute("SELECT COUNT(*) FROM facts WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
-        total_skills = self._conn.execute("SELECT COUNT(*) FROM skills").fetchone()[0]
-        global_skills = self._conn.execute("SELECT COUNT(*) FROM skills WHERE project_id IS NULL").fetchone()[0]
-        project_skills = 0
-        if self.current_project_id:
-            project_skills = self._conn.execute("SELECT COUNT(*) FROM skills WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
-        total_wiki = self._conn.execute("SELECT COUNT(*) FROM wiki_pages").fetchone()[0]
-        global_wiki = self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE project_id IS NULL").fetchone()[0]
-        project_wiki = 0
-        if self.current_project_id:
-            project_wiki = self._conn.execute("SELECT COUNT(*) FROM wiki_pages WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
-        total_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        global_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions WHERE project_id IS NULL").fetchone()[0]
-        project_sessions = 0
-        if self.current_project_id:
-            project_sessions = self._conn.execute("SELECT COUNT(*) FROM sessions WHERE project_id=?", (self.current_project_id,)).fetchone()[0]
-        avg_trust = self._conn.execute("SELECT AVG(trust_score) FROM facts").fetchone()[0] or 0
+        total_facts = self._query_count("SELECT COUNT(*) FROM facts")
+        global_facts = self._query_count("SELECT COUNT(*) FROM facts WHERE project_id IS NULL")
+        project_facts = self._query_count("SELECT COUNT(*) FROM facts WHERE project_id=?", (self.current_project_id,)) if self.current_project_id else 0
+        total_skills = self._query_count("SELECT COUNT(*) FROM skills")
+        global_skills = self._query_count("SELECT COUNT(*) FROM skills WHERE project_id IS NULL")
+        project_skills = self._query_count("SELECT COUNT(*) FROM skills WHERE project_id=?", (self.current_project_id,)) if self.current_project_id else 0
+        total_wiki = self._query_count("SELECT COUNT(*) FROM wiki_pages")
+        global_wiki = self._query_count("SELECT COUNT(*) FROM wiki_pages WHERE project_id IS NULL")
+        project_wiki = self._query_count("SELECT COUNT(*) FROM wiki_pages WHERE project_id=?", (self.current_project_id,)) if self.current_project_id else 0
+        total_sessions = self._query_count("SELECT COUNT(*) FROM sessions")
+        global_sessions = self._query_count("SELECT COUNT(*) FROM sessions WHERE project_id IS NULL")
+        project_sessions = self._query_count("SELECT COUNT(*) FROM sessions WHERE project_id=?", (self.current_project_id,)) if self.current_project_id else 0
+        avg_trust = self._query_count("SELECT AVG(trust_score) FROM facts") or 0
         return {
             'total_facts': total_facts,
             'global_facts': global_facts,
